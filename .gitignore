@@ -9,3 +9,17 @@ htmlcov/
 data/
 artifacts/
 mlruns/
+models/
+
+# Raw data — never commit
+olist_data/
+*.csv
+
+# Secrets — never commit
+PROJECT_CREDENTIALS.txt
+
+# Local-only / IDE material
+.idea/
+
+# Local MLflow server state (sqlite + artifacts)
+mlflow/

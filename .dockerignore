@@ -1,0 +1,27 @@
+# Keep the API image small and secret-free. The model is pulled from MLflow at
+# runtime, so no data/artifacts are baked in.
+.git/
+.gitignore
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+*.log
+
+# data & model artifacts (never baked into the image)
+olist_data/
+data/
+*.csv
+artifacts/
+mlflow/
+mlruns/
+models/
+
+# secrets & course material
+.env
+PROJECT_CREDENTIALS.txt
+
+# local IDE config
+.idea/

@@ -1,50 +1,100 @@
-from datetime import datetime
+from __future__ import annotations
+
+import logging
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from time import perf_counter
-from typing import Literal
 
 from fastapi import FastAPI
-from pydantic import BaseModel, Field
-from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from starlette.responses import Response
 
-app = FastAPI(title='MLOps Delivery delivery-risk API', version='1.0.0')
-REQUESTS = Counter('delivery_prediction_requests_total', 'Prediction requests', ['risk_level'])
-LATENCY = Histogram('delivery_prediction_latency_seconds', 'Prediction latency')
+from . import config, metrics
+from .logging_config import configure_logging
+from .middleware import LoggingMiddleware
+from .model_loader import ModelService
+from .predictor import predict_one
+from .schemas import HealthResponse, ModelInfoResponse, PredictionInput, PredictionResponse
 
-class PredictionInput(BaseModel):
-    order_id: str
-    item_total: float = Field(ge=0)
-    freight_total: float = Field(ge=0)
-    estimated_days: float = Field(gt=0, le=90)
-    purchase_hour: int = Field(ge=0, le=23)
-    purchase_weekday: int = Field(ge=0, le=6)
+configure_logging()
+log = logging.getLogger("api.main")
+model_service = ModelService()
 
-def predict(payload: PredictionInput) -> dict:
-    # Reference baseline: bounded, explainable risk score; replace with MLflow Staging model in production.
-    score = min(0.98, max(0.01, 0.06 + 0.018 * payload.estimated_days + 0.0012 * payload.freight_total + 0.012 * (payload.purchase_hour >= 18)))
-    level: Literal['low', 'medium', 'high'] = 'high' if score >= .55 else 'medium' if score >= .25 else 'low'
-    action = {'low': 'monitor normally', 'medium': 'confirm carrier capacity', 'high': 'prioritize fulfillment intervention'}[level]
-    REQUESTS.labels(level).inc()
-    return {'order_id': payload.order_id, 'late_delivery_probability': round(score, 4), 'risk_level': level, 'recommended_action': action, 'model_version': 'reference-baseline', 'latency': 0.0}
 
-@app.get('/health')
-def health(): return {'status': 'ok'}
+def _load_and_log() -> None:
+    model_service.load()
+    state = model_service.state
+    metrics.MODEL_LOADED.set(1 if state.is_real else 0)
+    log.info("model_loaded", extra={
+        "source": state.source, "is_real_model": state.is_real,
+        "model_version": state.version_string, "load_error": state.error,
+    })
 
-@app.get('/model-info')
-def model_info(): return {'name': 'reference-baseline', 'stage': 'Staging', 'temporal_leakage_policy': 'purchase-time features only'}
 
-@app.post('/predict')
-def single_prediction(payload: PredictionInput):
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    log.info("service_starting", extra={"app": config.APP_TITLE, "version": config.APP_VERSION})
+    # Resolve the model at startup. A fast TCP pre-check + capped retries keep this
+    # quick even when MLflow is down, so the model is ready before the first request.
+    if config.LOAD_MODEL_ON_STARTUP:
+        _load_and_log()
+    yield
+
+
+app = FastAPI(title=config.APP_TITLE, version=config.APP_VERSION, lifespan=lifespan)
+app.add_middleware(LoggingMiddleware)
+
+
+def _measured_predict(payload: PredictionInput) -> PredictionResponse:
     started = perf_counter()
-    response = predict(payload)
-    response['latency'] = round(perf_counter() - started, 6)
+    response = predict_one(model_service.state, payload)
+    latency = perf_counter() - started
+    metrics.LATENCY.observe(latency)
+    response.latency = round(latency, 6)
     return response
 
-@app.post('/batch-predict')
-def batch_prediction(payloads: list[PredictionInput]): return [single_prediction(payload) for payload in payloads]
 
-@app.get('/metrics-summary')
-def metrics_summary(): return {'generated_at': datetime.utcnow().isoformat() + 'Z', 'service': 'reference-baseline'}
+@app.get("/health", response_model=HealthResponse)
+def health() -> HealthResponse:
+    state = model_service.state
+    status_str = "loading" if state.source == "loading" else "ok"
+    return HealthResponse(
+        status=status_str, model_loaded=state.is_real,
+        model_source=state.source, error=state.error,
+    )
 
-@app.get('/metrics')
-def metrics(): return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+@app.get("/model-info", response_model=ModelInfoResponse)
+def model_info() -> ModelInfoResponse:
+    return ModelInfoResponse(**model_service.model_info())
+
+
+@app.post("/predict", response_model=PredictionResponse)
+def single_prediction(payload: PredictionInput) -> PredictionResponse:
+    metrics.REQUESTS.labels("/predict").inc()
+    model_service.ensure_loaded()
+    return _measured_predict(payload)
+
+
+@app.post("/batch-predict", response_model=list[PredictionResponse])
+def batch_prediction(payloads: list[PredictionInput]) -> list[PredictionResponse]:
+    metrics.REQUESTS.labels("/batch-predict").inc()
+    model_service.ensure_loaded()
+    return [_measured_predict(payload) for payload in payloads]
+
+
+@app.get("/metrics-summary")
+def metrics_summary() -> dict:
+    metrics.MODEL_LOADED.set(1 if model_service.state.is_real else 0)
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "model_version": model_service.state.version_string,
+        "model_source": model_service.state.source,
+        **metrics.summary(),
+    }
+
+
+@app.get("/metrics")
+def prometheus_metrics() -> Response:
+    metrics.MODEL_LOADED.set(1 if model_service.state.is_real else 0)
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
