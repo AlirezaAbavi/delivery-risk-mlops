@@ -1,0 +1,188 @@
+{
+  "uid": "delivery-delivery-risk-prom",
+  "title": "Delivery — Delivery-Risk Service (Prometheus)",
+  "description": "Service health + model output for the delivery delivery-risk API, read from the shared Capstone Prometheus. Every query is pinned to $instance so it never blends other groups' identically-named delivery_* metrics. Import into the delivery folder of the shared Grafana (localhost:3010).",
+  "tags": ["delivery", "delivery-risk", "mlops", "prometheus"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "instance",
+        "label": "API instance",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+        "definition": "label_values(up{job=\"capstone_group_apis\"}, instance)",
+        "query": { "query": "label_values(up{job=\"capstone_group_apis\"}, instance)", "refId": "instance" },
+        "current": { "text": "host.docker.internal:8112", "value": "host.docker.internal:8112" },
+        "refresh": 1,
+        "includeAll": false,
+        "multi": false,
+        "sort": 1
+      }
+    ]
+  },
+  "annotations": { "list": [] },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "API up",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+          "expr": "up{job=\"capstone_group_apis\", instance=\"$instance\"}", "instant": true, "legendFormat": "up" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short", "mappings": [
+            { "type": "value", "options": { "0": { "text": "DOWN", "color": "red" }, "1": { "text": "UP", "color": "green" } } }
+          ],
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "colorMode": "background", "graphMode": "none", "textMode": "value" }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Model loaded (1=real model, 0=baseline)",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+          "expr": "delivery_model_loaded{instance=\"$instance\"}", "instant": true, "legendFormat": "model_loaded" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short", "mappings": [
+            { "type": "value", "options": { "0": { "text": "baseline", "color": "orange" }, "1": { "text": "model", "color": "green" } } }
+          ],
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "orange", "value": null }, { "color": "green", "value": 1 } ] }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "colorMode": "background", "graphMode": "none", "textMode": "value" }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Total predictions",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+          "expr": "sum(delivery_predictions_total{instance=\"$instance\"})", "instant": true, "legendFormat": "predictions" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "fixed", "fixedColor": "blue" } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "colorMode": "value", "graphMode": "area", "textMode": "value" }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Scoring errors (degraded to baseline)",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+          "expr": "sum(delivery_prediction_errors_total{instance=\"$instance\"})", "instant": true, "legendFormat": "errors" }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short",
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] } },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "colorMode": "value", "graphMode": "none", "textMode": "value" }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Request rate by endpoint (req/s)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+          "expr": "sum by (endpoint) (rate(delivery_http_requests_total{instance=\"$instance\"}[5m]))", "legendFormat": "{{endpoint}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "drawStyle": "line", "fillOpacity": 10, "showPoints": "never" } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Error rate (HTTP >= 400, err/s)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+          "expr": "sum by (status) (rate(delivery_http_errors_total{instance=\"$instance\"}[5m]))", "legendFormat": "HTTP {{status}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "drawStyle": "line", "fillOpacity": 10, "showPoints": "never" }, "color": { "mode": "fixed", "fixedColor": "red" } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Prediction latency (p50 / p95 / p99, seconds)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(delivery_prediction_latency_seconds_bucket{instance=\"$instance\"}[5m])))", "legendFormat": "p50" },
+        { "refId": "B", "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(delivery_prediction_latency_seconds_bucket{instance=\"$instance\"}[5m])))", "legendFormat": "p95" },
+        { "refId": "C", "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(delivery_prediction_latency_seconds_bucket{instance=\"$instance\"}[5m])))", "legendFormat": "p99" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s", "custom": { "drawStyle": "line", "fillOpacity": 5, "showPoints": "never" } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 8,
+      "type": "piechart",
+      "title": "Risk-level distribution (model output)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+          "expr": "sum by (risk_level) (delivery_predictions_total{instance=\"$instance\"})", "instant": true, "legendFormat": "{{risk_level}}" }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "hideFrom": { "legend": false, "tooltip": false, "viz": false } },
+          "color": { "mode": "palette-classic" } },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "low" }, "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } } ] },
+          { "matcher": { "id": "byName", "options": "medium" }, "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "orange" } } ] },
+          { "matcher": { "id": "byName", "options": "high" }, "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } } ] }
+        ]
+      },
+      "options": { "pieType": "donut", "legend": { "displayMode": "table", "placement": "right", "values": ["value", "percent"] }, "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } }
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Predictions by risk level over time (pred/s)",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+          "expr": "sum by (risk_level) (rate(delivery_predictions_total{instance=\"$instance\"}[5m]))", "legendFormat": "{{risk_level}}" }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "drawStyle": "line", "fillOpacity": 20, "stacking": { "mode": "normal", "group": "A" }, "showPoints": "never" } },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "low" }, "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } } ] },
+          { "matcher": { "id": "byName", "options": "medium" }, "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "orange" } } ] },
+          { "matcher": { "id": "byName", "options": "high" }, "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } } ] }
+        ]
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    }
+  ]
+}
