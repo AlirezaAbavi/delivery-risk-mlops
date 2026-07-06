@@ -17,6 +17,7 @@ olist_data/
 
 # Secrets — never commit
 PROJECT_CREDENTIALS.txt
+ssh_credentials.txt
 
 # Local-only / IDE material
 .idea/
