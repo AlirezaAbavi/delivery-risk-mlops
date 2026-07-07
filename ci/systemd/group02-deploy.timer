@@ -1,0 +1,12 @@
+[Unit]
+Description=Run the delivery deploy hook every ~2 minutes
+
+[Timer]
+# First run shortly after login, then every 2 minutes.
+OnBootSec=1min
+OnUnitActiveSec=2min
+AccuracySec=15s
+Unit=delivery-deploy.service
+
+[Install]
+WantedBy=timers.target

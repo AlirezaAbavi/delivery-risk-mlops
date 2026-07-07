@@ -1,0 +1,10 @@
+[Unit]
+Description=delivery delivery-risk deploy hook (pull main + deploy on change)
+After=network-online.target
+
+[Service]
+Type=oneshot
+# %h = the user's home. The hook is self-contained and reads its own config.
+ExecStart=/usr/bin/env bash %h/project/ci/deploy_hook.sh
+# Don't let a slow test run pile up; the timer guards overlap too (flock).
+TimeoutStartSec=600
