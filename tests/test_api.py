@@ -122,6 +122,36 @@ def test_deploy_status_reports_latest_run(tmp_path, monkeypatch):
         assert 'delivery_deploy_last_commit_info{commit="bbbbbbb",status="success"} 1.0' in metrics
 
 
+def test_deploy_status_reconciles_retrain_outcome(tmp_path, monkeypatch):
+    import json
+    from app import config
+    runlog = tmp_path / 'deploy-runs.jsonl'
+    retrainlog = tmp_path / 'deploy-retrain.jsonl'
+    rid = 'deploy_hook__1783500000'
+    runlog.write_text(json.dumps({
+        'new_commit': 'ccccccc222', 'finished_at': '2026-07-08T10:00:00Z', 'duration_seconds': 25,
+        'status': 'success', 'changed_paths': ['app/config.py'],
+        'actions': {'restart': 'ok', 'trigger': 'queued', 'import': 'no'}, 'dag_run_id': rid,
+    }) + '\n')
+    monkeypatch.setattr(config, 'DEPLOY_RUNS_PATH', str(runlog))
+    monkeypatch.setattr(config, 'DEPLOY_RETRAIN_PATH', str(retrainlog))
+
+    with TestClient(app) as client:
+        # No retrain record yet -> the queued run reports as "running".
+        body = client.get('/deploy-status').json()
+        assert body['latest']['retrain']['state'] == 'running'
+        assert 'Retrain' in client.get('/deploy-status', params={'format': 'html'}).text
+        assert 'delivery_deploy_last_retrain_status 0.0' in client.get('/metrics').text
+
+        # Watcher records the terminal outcome -> reconciled to success.
+        retrainlog.write_text(json.dumps({'dag_run_id': rid, 'state': 'success', 'deploy_commit': 'ccccccc222'}) + '\n')
+        body = client.get('/deploy-status').json()
+        assert body['latest']['retrain']['state'] == 'success'
+        m = client.get('/metrics').text
+        assert 'delivery_deploy_last_retrain_status 1.0' in m
+        assert 'state="success"' in m
+
+
 def test_logging_and_error_observability():
     with TestClient(app) as client:
         # Every response carries a correlation id.

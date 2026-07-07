@@ -23,6 +23,9 @@ DEPLOY_LAST_DURATION = Gauge("delivery_deploy_last_duration_seconds", "Duration 
 DEPLOY_RUNS = Gauge("delivery_deploy_runs_total", "Deploy attempts recorded in the current run-log window")
 # Commit rides a label because Prometheus can't store strings (info-metric idiom).
 DEPLOY_LAST_COMMIT = Gauge("delivery_deploy_last_commit_info", "Last deploy commit as a label; value is always 1", ["commit", "status"])
+# Retrain outcome for the last deploy that queued one (reconciled async by watch_dag).
+DEPLOY_LAST_RETRAIN = Gauge("delivery_deploy_last_retrain_status", "1 if the last deploy's Airflow retrain succeeded, 0 otherwise")
+DEPLOY_LAST_RETRAIN_INFO = Gauge("delivery_deploy_last_retrain_info", "Last retrain state as a label; value is always 1", ["state", "run_id"])
 
 
 def _iso_to_epoch(value: str) -> float:
@@ -56,6 +59,13 @@ def refresh_deploy_gauges() -> None:
     commit = (latest.get("new_commit") or "")[:7]
     DEPLOY_LAST_COMMIT.clear()  # keep only the current commit series
     DEPLOY_LAST_COMMIT.labels(commit=commit, status=latest.get("status", "unknown")).set(1)
+
+    # retrain outcome (may still be running / absent for non-retrain deploys)
+    retrain = latest.get("retrain") or {}
+    rt_state = retrain.get("state")
+    DEPLOY_LAST_RETRAIN.set(1 if rt_state == "success" else 0)
+    DEPLOY_LAST_RETRAIN_INFO.clear()
+    DEPLOY_LAST_RETRAIN_INFO.labels(state=rt_state or "none", run_id=(retrain.get("dag_run_id") or "none")).set(1)
 
 
 def _counter_by_label(counter, label: str) -> dict:

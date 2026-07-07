@@ -44,6 +44,16 @@ line to `~/deploy-runs.jsonl` via `record_run.py`:
 deploys are recorded too. Writing the record is best-effort and runs *after* the
 deploy actions — it can never change the hook's outcome or exit code.
 
+**Airflow retrain outcome (async).** The retrain is triggered fire-and-forget, so
+the record marks `trigger: queued` and captures the `dag_run_id` — it does *not*
+block for the multi-minute run. Each timer tick then runs `record_run`'s sibling
+`watch_dag.py`, which polls Airflow once for that run and, when it reaches a
+terminal state (or ages out), appends the outcome to `~/deploy-retrain.jsonl`.
+This is driven by the existing timer, not a detached process (a child of the
+oneshot deploy service would be killed with its cgroup); it is idempotent and
+survives restarts. The API joins the two files so the flowchart shows the retrain
+as **running → success/failed**, distinct from "was it triggered".
+
 The FastAPI service reads this file **on demand** (read-only) and surfaces it:
 
 - `GET /deploy-status` — JSON `{latest, recent (last 20), total_recorded}`;
@@ -63,9 +73,10 @@ between the hook and the API's environment).
 
 | File | Role |
 |---|---|
-| `deploy_hook.sh` | the hook (fetch → gate → conditional deploy → record run) |
+| `deploy_hook.sh` | the hook (reconcile retrain → fetch → gate → conditional deploy → record run) |
 | `record_run.py` | append one JSONL run record to `~/deploy-runs.jsonl` (best-effort) |
-| `trigger_dag.py` | trigger `delivery_capstone_workflow` on the course Airflow |
+| `watch_dag.py` | reconcile the triggered retrain's outcome into `~/deploy-retrain.jsonl` (per-tick, non-blocking) |
+| `trigger_dag.py` | trigger `delivery_capstone_workflow` on the course Airflow (writes back the run id) |
 | `import_grafana.py` | POST `grafana/dashboards/*.json` to Grafana (overwrite) |
 | `systemd/delivery-deploy.service` | oneshot that runs the hook |
 | `systemd/delivery-deploy.timer` | fires the service every ~2 min |

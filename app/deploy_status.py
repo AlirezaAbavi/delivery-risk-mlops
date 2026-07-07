@@ -48,6 +48,42 @@ def _read_records(limit: int) -> list[dict]:
     return records[-limit:] if limit > 0 else records
 
 
+def _read_retrain() -> dict:
+    """Map dag_run_id -> retrain outcome record (written by ci/watch_dag.py)."""
+    out: dict[str, dict] = {}
+    try:
+        with open(config.DEPLOY_RETRAIN_PATH, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                rid = rec.get("dag_run_id")
+                if rid:
+                    out[rid] = rec  # last write wins
+    except (FileNotFoundError, OSError):
+        return {}
+    return out
+
+
+def retrain_state_for(record: Optional[dict]) -> Optional[str]:
+    """Retrain state for a deploy: None (none queued) | running | success | failed | timeout.
+
+    A deploy that queued a DAG run but has no terminal outcome recorded yet is
+    reported as ``running`` — the tick reconciler fills the outcome in later.
+    """
+    if not record:
+        return None
+    rid = record.get("dag_run_id")
+    if not rid:
+        return None
+    rec = _read_retrain().get(rid)
+    return rec.get("state") if rec else "running"
+
+
 def is_success(record: Optional[dict]) -> bool:
     return bool(record) and record.get("status") == "success"
 
@@ -64,7 +100,8 @@ def snapshot(history_limit: Optional[int] = None) -> dict:
             "recent": [],
             "total_recorded": 0,
         }
-    latest = recent[-1]
+    latest = dict(recent[-1])
+    latest["retrain"] = {"dag_run_id": latest.get("dag_run_id"), "state": retrain_state_for(latest)}
     return {
         "status": latest.get("status", "unknown"),
         "latest": latest,
@@ -113,7 +150,13 @@ def _action_state(value: Optional[str], tests_passed: bool) -> str:
         return "failed"
     if v == "ok":
         return "ok"
+    if v == "queued":
+        return "queued"  # fire-and-forget trigger accepted; outcome via retrain node
     return "warn"  # e.g. restarted-but-health-unconfirmed
+
+
+# map a retrain outcome onto a flowchart node state
+_RETRAIN_NODE = {"success": "ok", "failed": "failed", "timeout": "warn", "running": "running"}
 
 
 def deploy_steps(record: Optional[dict]) -> dict:
@@ -126,6 +169,7 @@ def deploy_steps(record: Optional[dict]) -> dict:
     status = record.get("status", "")
     tests_passed = status not in ("ff_failed", "tests_failed")
     actions = record.get("actions", {})
+    rt = retrain_state_for(record)
     return {
         "gate": [
             {"name": n, "state": _gate_state(k, status), "detail": ""} for n, k in _GATE
@@ -138,4 +182,9 @@ def deploy_steps(record: Optional[dict]) -> dict:
             }
             for n, k in _ACTIONS
         ],
+        "retrain": {
+            "name": "Retrain",
+            "state": _RETRAIN_NODE.get(rt, "skipped") if rt else "skipped",
+            "detail": rt or "not run",
+        },
     }

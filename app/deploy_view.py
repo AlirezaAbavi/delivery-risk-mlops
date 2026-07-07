@@ -12,11 +12,15 @@ from . import deploy_status
 # flowchart node colours by step state
 _STEP_FILL = {
     "ok": "#2e7d32", "failed": "#c62828", "warn": "#f9a825",
+    "running": "#1565c0", "queued": "#1565c0",
     "skipped": "#e0e0e0", "pending": "#bdbdbd",
 }
 _STEP_TEXT = {"skipped": "#555", "warn": "#3a2f00"}  # dark text on light fills; else white
 # short sub-label shown inside a node (full action string lives in the table)
-_STEP_LABEL = {"ok": "ok", "failed": "failed", "warn": "needs check", "skipped": "not run", "pending": "—"}
+_STEP_LABEL = {
+    "ok": "ok", "failed": "failed", "warn": "needs check",
+    "running": "running", "queued": "queued", "skipped": "not run", "pending": "—",
+}
 
 _STATUS_COLOR = {
     "success": "#2e7d32",
@@ -87,15 +91,17 @@ def render_flowchart_svg(record) -> str:
     """
     steps = deploy_status.deploy_steps(record)
     gate, actions = steps["gate"], steps["actions"]
+    retrain = steps.get("retrain")
     w, h = 150, 46
     gate_x = [10, 200, 390]
     gate_y = 97
     act_x = 620
     act_y = [15, 97, 179]
+    retrain_x = 810  # sits to the right of the Trigger Airflow action (actions[1])
 
     parts = [
-        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 790 250" width="100%" '
-        'style="max-width:820px" role="img" aria-label="deploy pipeline flowchart">',
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 250" width="100%" '
+        'style="max-width:960px" role="img" aria-label="deploy pipeline flowchart">',
         '<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" '
         'markerWidth="7" markerHeight="7" orient="auto-start-reverse">'
         '<path d="M0,0 L10,5 L0,10 z" fill="#9e9e9e"/></marker></defs>',
@@ -111,6 +117,11 @@ def render_flowchart_svg(record) -> str:
     for i, step in enumerate(actions):
         parts.append(_arrow(branch_x, branch_y, act_x, act_y[i] + h // 2))
         parts.append(_svg_node(act_x, act_y[i], step))
+    # retrain is the async child of the Trigger Airflow action (actions[1], middle)
+    if retrain:
+        trig_y = act_y[1] + h // 2
+        parts.append(_arrow(act_x + w, trig_y, retrain_x, trig_y))
+        parts.append(_svg_node(retrain_x, act_y[1], retrain))
     parts.append("</svg>")
     return "".join(parts)
 
@@ -141,6 +152,7 @@ def render_deploy_html(snapshot: dict) -> str:
         '<span style="color:#2e7d32">&#9632;</span> ok &nbsp;'
         '<span style="color:#c62828">&#9632;</span> failed &nbsp;'
         '<span style="color:#f9a825">&#9632;</span> warning &nbsp;'
+        '<span style="color:#1565c0">&#9632;</span> queued / running &nbsp;'
         '<span style="color:#bdbdbd">&#9632;</span> skipped / not run</div>'
     )
 

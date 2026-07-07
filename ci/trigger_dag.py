@@ -63,6 +63,12 @@ def main() -> None:
         sys.exit(f"trigger_dag: POST dagRuns -> {r.status_code} {r.text[:200]}")
     print(f"trigger_dag: started {DAG_ID} run {run_id}")
 
+    # Hand the run id back so the deploy hook can record it and the retrain
+    # watcher can reconcile the run's real outcome later.
+    rid_file = os.getenv("DAG_RUN_ID_FILE")
+    if rid_file:
+        Path(rid_file).write_text(run_id)
+
 
 if __name__ == "__main__":
     main()

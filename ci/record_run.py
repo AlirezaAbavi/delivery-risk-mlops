@@ -58,6 +58,7 @@ def main() -> None:
             "trigger": os.getenv("DR_TRIGGER", "no"),
             "import": os.getenv("DR_IMPORT", "no"),
         },
+        "dag_run_id": os.getenv("DR_DAG_RUN_ID", "") or None,
         "host": os.uname().nodename,
     }
 

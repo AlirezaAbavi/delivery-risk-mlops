@@ -17,6 +17,7 @@ BRANCH="${DEPLOY_BRANCH:-main}"
 PY="$PROJECT_DIR/.venv/bin/python"
 LOG="${DEPLOY_LOG:-$HOME/deploy-hook.log}"
 RUNS="${DEPLOY_RUNS_PATH:-$HOME/deploy-runs.jsonl}"
+RETRAIN="${DEPLOY_RETRAIN_PATH:-$HOME/deploy-retrain.jsonl}"
 API_UNIT="delivery-capstone-api.service"
 
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >>"$LOG"; }
@@ -27,7 +28,7 @@ STARTED_AT="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 START_EPOCH="$(date +%s)"
 RECORD=0                       # flips to 1 once we commit to deploying a new commit
 OLD=""; NEW=""; CHANGED=""
-restarted="no"; triggered="no"; imported="no"
+restarted="no"; triggered="no"; imported="no"; DAG_RUN_ID=""
 
 # write_record appends one JSONL line via the helper; best-effort, never fatal.
 write_record() {
@@ -40,6 +41,7 @@ write_record() {
     DR_CHANGED_PATHS="$CHANGED" \
     DR_STATUS="$1" \
     DR_RESTART="$restarted" DR_TRIGGER="$triggered" DR_IMPORT="$imported" \
+    DR_DAG_RUN_ID="$DAG_RUN_ID" \
     DEPLOY_RUNS_PATH="$RUNS" \
     "$PY" "$PROJECT_DIR/ci/record_run.py" >>"$LOG" 2>&1 || log "WARN: record_run failed"
 }
@@ -52,6 +54,15 @@ exec 9>"$HOME/.deploy-hook.lock"
 flock -n 9 || { log "another run holds the lock; skipping"; exit 0; }
 
 cd "$PROJECT_DIR" || { log "ERROR: project dir $PROJECT_DIR missing"; exit 1; }
+
+# 0. reconcile the previous deploy's retrain outcome (every tick, quiet no-op).
+# Non-blocking: one quick Airflow poll; writes a terminal outcome only once the
+# run has finished/aged out. Runs before the up-to-date bail-out so it keeps
+# ticking even when there is no new commit to deploy.
+if [ -f "$PROJECT_DIR/ci/watch_dag.py" ]; then
+    DEPLOY_RUNS_PATH="$RUNS" DEPLOY_RETRAIN_PATH="$RETRAIN" \
+        "$PY" "$PROJECT_DIR/ci/watch_dag.py" >>"$LOG" 2>&1 || true
+fi
 
 # 1. fetch; bail out fast when nothing changed.
 if ! git fetch --quiet origin "$BRANCH"; then
@@ -103,13 +114,18 @@ if changed_matches '^app/|^pipeline/|^requirements\.txt$'; then
 fi
 
 # 6. trigger the Airflow retrain ONLY when ML-pipeline logic changed.
+# Fire-and-forget: we record "queued" (not "ok") and capture the run id so the
+# tick reconciler above can later resolve the retrain's real success/failure.
 if changed_matches '^pipeline/|^app/config\.py$'; then
-    if "$PY" "$PROJECT_DIR/ci/trigger_dag.py" >>"$LOG" 2>&1; then
-        triggered="ok"
+    RID_FILE="$(mktemp)"
+    if DAG_RUN_ID_FILE="$RID_FILE" "$PY" "$PROJECT_DIR/ci/trigger_dag.py" >>"$LOG" 2>&1; then
+        triggered="queued"
+        DAG_RUN_ID="$(cat "$RID_FILE" 2>/dev/null)"
     else
         triggered="trigger-FAILED"
     fi
-    log "Airflow trigger: $triggered"
+    rm -f "$RID_FILE"
+    log "Airflow trigger: $triggered${DAG_RUN_ID:+ (run $DAG_RUN_ID)}"
 fi
 
 # 7. re-import Grafana dashboards when they changed.
