@@ -15,6 +15,48 @@ ERRORS = Counter("delivery_prediction_errors_total", "Model scoring failures (de
 LATENCY = Histogram("delivery_prediction_latency_seconds", "Per-prediction latency in seconds")
 MODEL_LOADED = Gauge("delivery_model_loaded", "1 if a trained model is serving, 0 if baseline")
 
+# --- deploy monitoring (CD-hook run records) --------------------------------
+# Refreshed from ~/deploy-runs.jsonl at scrape time (see refresh_deploy_gauges).
+DEPLOY_LAST_STATUS = Gauge("delivery_deploy_last_status", "1 if the last CD-hook deploy succeeded, 0 otherwise")
+DEPLOY_LAST_TIMESTAMP = Gauge("delivery_deploy_last_timestamp_seconds", "Unix time the last deploy finished")
+DEPLOY_LAST_DURATION = Gauge("delivery_deploy_last_duration_seconds", "Duration of the last deploy in seconds")
+DEPLOY_RUNS = Gauge("delivery_deploy_runs_total", "Deploy attempts recorded in the current run-log window")
+# Commit rides a label because Prometheus can't store strings (info-metric idiom).
+DEPLOY_LAST_COMMIT = Gauge("delivery_deploy_last_commit_info", "Last deploy commit as a label; value is always 1", ["commit", "status"])
+
+
+def _iso_to_epoch(value: str) -> float:
+    from datetime import datetime
+
+    if not value:
+        return 0.0
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return 0.0
+
+
+def refresh_deploy_gauges() -> None:
+    """Pull the latest CD-hook record and reflect it in the deploy gauges.
+
+    Called at scrape time so Prometheus/Grafana see deploy status without any
+    background thread. Read-only and defensive: any failure leaves gauges as-is.
+    """
+    from . import deploy_status
+
+    snap = deploy_status.snapshot()
+    DEPLOY_RUNS.set(snap.get("total_recorded", 0))
+    latest = snap.get("latest")
+    if not latest:
+        DEPLOY_LAST_STATUS.set(0)
+        return
+    DEPLOY_LAST_STATUS.set(1 if deploy_status.is_success(latest) else 0)
+    DEPLOY_LAST_TIMESTAMP.set(_iso_to_epoch(latest.get("finished_at", "")))
+    DEPLOY_LAST_DURATION.set(float(latest.get("duration_seconds", 0) or 0))
+    commit = (latest.get("new_commit") or "")[:7]
+    DEPLOY_LAST_COMMIT.clear()  # keep only the current commit series
+    DEPLOY_LAST_COMMIT.labels(commit=commit, status=latest.get("status", "unknown")).set(1)
+
 
 def _counter_by_label(counter, label: str) -> dict:
     out: dict[str, float] = {}
