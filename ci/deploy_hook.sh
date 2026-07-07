@@ -83,14 +83,19 @@ log "tests passed"
 changed_matches() { echo "$CHANGED" | grep -Eq "$1"; }
 
 # 5. restart the API when files the running service loads changed.
+# Poll /health rather than sleeping a fixed time: the API loads the MLflow model
+# at startup, which can take several seconds, so a single early curl would report
+# a false "unconfirmed" on a perfectly healthy restart.
 if changed_matches '^app/|^pipeline/|^requirements\.txt$'; then
     if systemctl --user restart "$API_UNIT"; then
-        sleep 4
-        if curl -fsS -m 8 http://127.0.0.1:8112/health >>"$LOG" 2>&1; then
-            echo >>"$LOG"; restarted="ok"
-        else
-            restarted="restarted-but-health-unconfirmed"
-        fi
+        restarted="restarted-but-health-unconfirmed"
+        for _ in $(seq 1 15); do          # up to ~30s for the model to load and bind
+            if curl -fsS -m 5 http://127.0.0.1:8112/health >/dev/null 2>&1; then
+                restarted="ok"; break
+            fi
+            sleep 2
+        done
+        [ "$restarted" = "ok" ] && { curl -fsS -m 5 http://127.0.0.1:8112/health >>"$LOG" 2>&1; echo >>"$LOG"; }
     else
         restarted="restart-FAILED"
     fi
