@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 APP_TITLE = "MLOps Delivery delivery-risk API"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"  # adds deploy-monitoring endpoints (/deploy-status + delivery_deploy_* metrics)
 
 # --- model source ----------------------------------------------------------
 MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "http://127.0.0.1:5312")

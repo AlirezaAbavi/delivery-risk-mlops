@@ -5,7 +5,7 @@
   "tags": ["delivery", "delivery-risk", "mlops", "prometheus"],
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 2,
+  "version": 3,
   "editable": true,
   "refresh": "30s",
   "time": { "from": "now-6h", "to": "now" },
