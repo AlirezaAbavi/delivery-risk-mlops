@@ -78,6 +78,50 @@ def test_metrics_summary_rollup():
         assert 'delivery_http_requests_total' in body
 
 
+def test_deploy_status_unknown_without_runlog(tmp_path, monkeypatch):
+    # With no CD-hook run-log the endpoint must degrade to 'unknown', never error,
+    # so deploy monitoring can't affect serving.
+    from app import config
+    monkeypatch.setattr(config, 'DEPLOY_RUNS_PATH', str(tmp_path / 'absent.jsonl'))
+    with TestClient(app) as client:
+        body = client.get('/deploy-status').json()
+        assert body['status'] == 'unknown'
+        assert body['latest'] is None and body['recent'] == []
+        assert 'delivery_deploy_last_status 0.0' in client.get('/metrics').text
+
+
+def test_deploy_status_reports_latest_run(tmp_path, monkeypatch):
+    import json
+    from app import config
+    runlog = tmp_path / 'deploy-runs.jsonl'
+    runlog.write_text(
+        json.dumps({'new_commit': 'aaaaaaa000', 'finished_at': '2026-07-07T18:00:00Z',
+                    'duration_seconds': 30, 'status': 'tests_failed',
+                    'changed_paths': ['tests/test_api.py'], 'actions': {'restart': 'no'}}) + '\n'
+        + json.dumps({'new_commit': 'bbbbbbb111', 'finished_at': '2026-07-07T18:10:00Z',
+                      'duration_seconds': 42, 'status': 'success',
+                      'changed_paths': ['app/main.py'], 'actions': {'restart': 'ok'}}) + '\n'
+    )
+    monkeypatch.setattr(config, 'DEPLOY_RUNS_PATH', str(runlog))
+    with TestClient(app) as client:
+        body = client.get('/deploy-status').json()
+        assert body['status'] == 'success'                 # latest wins
+        assert body['latest']['new_commit'] == 'bbbbbbb111'
+        assert [r['new_commit'] for r in body['recent']][0] == 'bbbbbbb111'  # newest first
+
+        html = client.get('/deploy-status', params={'format': 'html'})
+        assert html.headers['content-type'].startswith('text/html')
+        assert 'bbbbbbb' in html.text
+        # the pipeline flowchart is drawn (inline SVG with the gate + action steps)
+        assert '<svg' in html.text
+        for step in ('New commit', 'Test gate', 'Restart API', 'Import Grafana'):
+            assert step in html.text
+
+        metrics = client.get('/metrics').text
+        assert 'delivery_deploy_last_status 1.0' in metrics
+        assert 'delivery_deploy_last_commit_info{commit="bbbbbbb",status="success"} 1.0' in metrics
+
+
 def test_logging_and_error_observability():
     with TestClient(app) as client:
         # Every response carries a correlation id.

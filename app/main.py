@@ -5,11 +5,12 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from time import perf_counter
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
-from starlette.responses import Response
+from starlette.responses import HTMLResponse, JSONResponse, Response
 
-from . import config, metrics
+from . import config, deploy_status, metrics
+from .deploy_view import render_deploy_html
 from .logging_config import configure_logging
 from .middleware import LoggingMiddleware
 from .model_loader import ModelService
@@ -86,15 +87,34 @@ def batch_prediction(payloads: list[PredictionInput]) -> list[PredictionResponse
 @app.get("/metrics-summary")
 def metrics_summary() -> dict:
     metrics.MODEL_LOADED.set(1 if model_service.state.is_real else 0)
+    metrics.refresh_deploy_gauges()
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "model_version": model_service.state.version_string,
         "model_source": model_service.state.source,
+        "last_deploy": deploy_status.latest(),
         **metrics.summary(),
     }
+
+
+@app.get("/deploy-status")
+def deploy_status_route(request: Request, format: str | None = None) -> Response:
+    """CD-hook deploy history (latest run + recent attempts).
+
+    JSON by default; ``?format=html`` — or a browser ``Accept: text/html`` — gets
+    a small standalone HTML view. Robust to a missing run-log (status=unknown).
+    """
+    snapshot = deploy_status.snapshot()
+    wants_html = format == "html" or (
+        format is None and "text/html" in request.headers.get("accept", "")
+    )
+    if wants_html:
+        return HTMLResponse(render_deploy_html(snapshot))
+    return JSONResponse(snapshot)
 
 
 @app.get("/metrics")
 def prometheus_metrics() -> Response:
     metrics.MODEL_LOADED.set(1 if model_service.state.is_real else 0)
+    metrics.refresh_deploy_gauges()
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)

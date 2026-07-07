@@ -5,7 +5,7 @@
   "tags": ["delivery", "delivery-risk", "mlops", "prometheus"],
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "editable": true,
   "refresh": "30s",
   "time": { "from": "now-6h", "to": "now" },
@@ -183,6 +183,95 @@
         ]
       },
       "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 20,
+      "type": "row",
+      "title": "Deployment (CD hook)",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 28 },
+      "panels": []
+    },
+    {
+      "id": 21,
+      "type": "stat",
+      "title": "Last deploy status",
+      "description": "1 if the most recent CD-hook deploy succeeded (tests passed + actions ok), 0 otherwise. Sourced from the API's delivery_deploy_last_status gauge, which reads ~/deploy-runs.jsonl.",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 29 },
+      "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+          "expr": "delivery_deploy_last_status{instance=\"$instance\"}", "instant": true, "legendFormat": "status" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short", "mappings": [
+            { "type": "value", "options": { "0": { "text": "FAILED", "color": "red" }, "1": { "text": "OK", "color": "green" } } }
+          ],
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "colorMode": "background", "graphMode": "none", "textMode": "value" }
+    },
+    {
+      "id": 22,
+      "type": "stat",
+      "title": "Time since last deploy",
+      "description": "Age of the most recent recorded deploy.",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 29 },
+      "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+          "expr": "time() - delivery_deploy_last_timestamp_seconds{instance=\"$instance\"}", "instant": true, "legendFormat": "age" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s", "color": { "mode": "fixed", "fixedColor": "blue" } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "colorMode": "value", "graphMode": "none", "textMode": "value" }
+    },
+    {
+      "id": 23,
+      "type": "stat",
+      "title": "Last deploy duration",
+      "description": "Wall-clock time the last deploy (fetch → test gate → restart/trigger/import) took.",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 29 },
+      "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+          "expr": "delivery_deploy_last_duration_seconds{instance=\"$instance\"}", "instant": true, "legendFormat": "duration" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s", "color": { "mode": "fixed", "fixedColor": "purple" } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "colorMode": "value", "graphMode": "none", "textMode": "value" }
+    },
+    {
+      "id": 24,
+      "type": "stat",
+      "title": "Deploys recorded",
+      "description": "Number of deploy attempts in the current run-log window (last ~20).",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 29 },
+      "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+          "expr": "delivery_deploy_runs_total{instance=\"$instance\"}", "instant": true, "legendFormat": "runs" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "fixed", "fixedColor": "blue" } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "colorMode": "value", "graphMode": "none", "textMode": "value" }
+    },
+    {
+      "id": 25,
+      "type": "table",
+      "title": "Last deploy commit",
+      "description": "Commit SHA and status of the last deploy, carried as labels on delivery_deploy_last_commit_info. Full history + changed paths are at the API's /deploy-status endpoint.",
+      "gridPos": { "h": 5, "w": 24, "x": 0, "y": 33 },
+      "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+          "expr": "delivery_deploy_last_commit_info{instance=\"$instance\"}", "instant": true, "format": "table" }
+      ],
+      "transformations": [
+        { "id": "organize", "options": { "excludeByName": { "Time": true, "Value": true, "__name__": true, "job": true }, "renameByName": { "commit": "Commit", "status": "Status", "instance": "Instance" } } }
+      ],
+      "fieldConfig": { "defaults": { "custom": { "align": "left" } }, "overrides": [] },
+      "options": { "showHeader": true }
     }
   ]
 }

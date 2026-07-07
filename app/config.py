@@ -30,6 +30,13 @@ MLFLOW_PROBE_TIMEOUT = float(os.getenv("MLFLOW_PROBE_TIMEOUT", "1.5"))
 
 BASELINE_VERSION = "reference-baseline"
 
+# --- deploy monitoring -----------------------------------------------------
+# JSONL run-records written by ci/deploy_hook.sh. Read-only, on demand, so the
+# service can surface CD-hook history without a separate platform. Both the hook
+# and this service run as the same VM user, so the home-dir default resolves.
+DEPLOY_RUNS_PATH = os.getenv("DEPLOY_RUNS_PATH", os.path.expanduser("~/deploy-runs.jsonl"))
+DEPLOY_HISTORY_LIMIT = int(os.getenv("DEPLOY_HISTORY_LIMIT", "20"))
+
 # --- risk policy -----------------------------------------------------------
 HIGH_RISK_THRESHOLD = float(os.getenv("HIGH_RISK_THRESHOLD", "0.55"))
 MEDIUM_RISK_THRESHOLD = float(os.getenv("MEDIUM_RISK_THRESHOLD", "0.25"))
