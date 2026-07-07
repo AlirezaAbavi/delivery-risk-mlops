@@ -19,6 +19,9 @@ olist_data/
 PROJECT_CREDENTIALS.txt
 ssh_credentials.txt
 
+# Course PDF (the generic brief; STUDENT_BRIEF.md is the authoritative one)
+*.pdf
+
 # Local-only / IDE material
 .idea/
 
