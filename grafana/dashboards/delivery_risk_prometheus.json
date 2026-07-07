@@ -5,7 +5,7 @@
   "tags": ["delivery", "delivery-risk", "mlops", "prometheus"],
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 3,
+  "version": 4,
   "editable": true,
   "refresh": "30s",
   "time": { "from": "now-6h", "to": "now" },
@@ -257,11 +257,33 @@
       "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "colorMode": "value", "graphMode": "none", "textMode": "value" }
     },
     {
+      "id": 26,
+      "type": "stat",
+      "title": "Retrain succeeded",
+      "description": "1 if the last deploy's Airflow retrain finished successfully, 0 otherwise (failed / still running / no retrain queued). See the 'Last retrain state' table for the exact state. Sourced from delivery_deploy_last_retrain_status, reconciled async by ci/watch_dag.py.",
+      "gridPos": { "h": 5, "w": 6, "x": 0, "y": 33 },
+      "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+          "expr": "delivery_deploy_last_retrain_status{instance=\"$instance\"}", "instant": true, "legendFormat": "retrain" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short", "mappings": [
+            { "type": "value", "options": { "0": { "text": "no / pending", "color": "orange" }, "1": { "text": "SUCCESS", "color": "green" } } }
+          ],
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "orange", "value": null }, { "color": "green", "value": 1 } ] }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "colorMode": "background", "graphMode": "none", "textMode": "value" }
+    },
+    {
       "id": 25,
       "type": "table",
       "title": "Last deploy commit",
       "description": "Commit SHA and status of the last deploy, carried as labels on delivery_deploy_last_commit_info. Full history + changed paths are at the API's /deploy-status endpoint.",
-      "gridPos": { "h": 5, "w": 24, "x": 0, "y": 33 },
+      "gridPos": { "h": 5, "w": 9, "x": 6, "y": 33 },
       "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
       "targets": [
         { "refId": "A", "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
@@ -269,6 +291,23 @@
       ],
       "transformations": [
         { "id": "organize", "options": { "excludeByName": { "Time": true, "Value": true, "__name__": true, "job": true }, "renameByName": { "commit": "Commit", "status": "Status", "instance": "Instance" } } }
+      ],
+      "fieldConfig": { "defaults": { "custom": { "align": "left" } }, "overrides": [] },
+      "options": { "showHeader": true }
+    },
+    {
+      "id": 27,
+      "type": "table",
+      "title": "Last retrain state",
+      "description": "State (running / success / failed / timeout / none) and Airflow run id of the retrain the last deploy queued, carried as labels on delivery_deploy_last_retrain_info. Reconciled asynchronously so it lags the deploy while the DAG runs.",
+      "gridPos": { "h": 5, "w": 9, "x": 15, "y": 33 },
+      "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+          "expr": "delivery_deploy_last_retrain_info{instance=\"$instance\"}", "instant": true, "format": "table" }
+      ],
+      "transformations": [
+        { "id": "organize", "options": { "excludeByName": { "Time": true, "Value": true, "__name__": true, "job": true, "instance": true }, "renameByName": { "state": "State", "run_id": "Airflow run" } } }
       ],
       "fieldConfig": { "defaults": { "custom": { "align": "left" } }, "overrides": [] },
       "options": { "showHeader": true }
