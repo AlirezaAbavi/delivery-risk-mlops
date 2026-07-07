@@ -116,6 +116,23 @@ def latest() -> Optional[dict]:
     return recent[-1] if recent else None
 
 
+def latest_retrain() -> Optional[dict]:
+    """Most recent deploy that queued a retrain, with its reconciled state.
+
+    Used by the Grafana gauges so the retrain status persists across later
+    non-retrain deploys (a docs/dashboard push shouldn't blank the panel). The
+    per-deploy flowchart stays scoped to the latest deploy instead.
+    """
+    for rec in reversed(_read_records(config.DEPLOY_HISTORY_LIMIT)):
+        if rec.get("dag_run_id"):
+            return {
+                "dag_run_id": rec["dag_run_id"],
+                "state": retrain_state_for(rec),
+                "deploy_commit": rec.get("new_commit", ""),
+            }
+    return None
+
+
 # --- flowchart model -------------------------------------------------------
 # The deploy hook runs a fixed pipeline: fetch a new commit -> fast-forward ->
 # test gate -> then, per changed paths, restart the API / trigger Airflow /

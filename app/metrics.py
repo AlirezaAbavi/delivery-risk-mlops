@@ -60,8 +60,9 @@ def refresh_deploy_gauges() -> None:
     DEPLOY_LAST_COMMIT.clear()  # keep only the current commit series
     DEPLOY_LAST_COMMIT.labels(commit=commit, status=latest.get("status", "unknown")).set(1)
 
-    # retrain outcome (may still be running / absent for non-retrain deploys)
-    retrain = latest.get("retrain") or {}
+    # retrain outcome: the most recent deploy that actually queued a retrain, so
+    # the panel persists across later non-retrain deploys (may still be running).
+    retrain = deploy_status.latest_retrain() or {}
     rt_state = retrain.get("state")
     DEPLOY_LAST_RETRAIN.set(1 if rt_state == "success" else 0)
     DEPLOY_LAST_RETRAIN_INFO.clear()
