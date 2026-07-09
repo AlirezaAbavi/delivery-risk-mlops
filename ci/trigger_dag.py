@@ -25,6 +25,7 @@ DAG_ID = "delivery_capstone_workflow"
 
 
 def load_secrets(path: Path) -> dict:
+    """Parse the KEY=VALUE ~/.deploy-secrets file (see import_grafana for the rationale)."""
     secrets: dict[str, str] = {}
     if not path.exists():
         sys.exit(f"trigger_dag: secrets file {path} not found")
@@ -44,8 +45,14 @@ def main() -> None:
     if not user or not pw:
         sys.exit("trigger_dag: AIRFLOW_USER/AIRFLOW_PASS missing in ~/.deploy-secrets")
 
+    # The course Airflow's REST API rejects plain HTTP basic auth, so we authenticate the
+    # way the *web UI* does: log in through Flask-AppBuilder to obtain a session cookie.
+    # A shared Session object carries that cookie onto the subsequent API call.
     sess = requests.Session()
     sess.headers["User-Agent"] = "delivery-deploy-hook"
+    # FAB protects its login form with a CSRF token embedded in the page HTML. Fetch the
+    # login page, scrape the token out of it, and post it back with the credentials — a
+    # login POST without the matching token would be rejected.
     login = sess.get(base + "/login/", timeout=20)
     tok = re.search(r'name="csrf_token"[^>]*value="([^"]+)"', login.text)
     data = {"username": user, "password": pw}
@@ -53,6 +60,9 @@ def main() -> None:
         data["csrf_token"] = tok.group(1)
     sess.post(base + "/login/", data=data, timeout=20)
 
+    # Now authenticated, POST a new DAG run. We supply our own dag_run_id (timestamped) so
+    # it's unique per trigger and, crucially, so the hook can hand it to watch_dag.py to
+    # reconcile this exact run's outcome later. 200/201 both mean "run created".
     run_id = f"deploy_hook__{int(time.time())}"
     r = sess.post(
         f"{base}/api/v1/dags/{DAG_ID}/dagRuns",

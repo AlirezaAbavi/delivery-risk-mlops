@@ -36,6 +36,8 @@ from pathlib import Path
 import requests
 
 DAG_ID = "delivery_capstone_workflow"
+# Airflow run states that are "done" — once a run reaches one of these it will never
+# change again, so we can safely record a final outcome and stop polling it.
 TERMINAL = {"success", "failed"}
 
 
@@ -48,6 +50,12 @@ def _retrain_path() -> Path:
 
 
 def _read_jsonl(path: Path) -> list[dict]:
+    """Parse a JSONL file into a list of dicts, tolerating a missing file / bad lines.
+
+    Robustness matters here: this reconciler must never crash a deploy tick, so a
+    half-written or corrupt line is skipped rather than raised, and an absent file is just
+    an empty history.
+    """
     out: list[dict] = []
     try:
         for line in path.read_text(encoding="utf-8").splitlines():
@@ -76,7 +84,13 @@ def _load_secrets() -> dict:
 
 
 def _airflow_run_state(run_id: str) -> str | None:
-    """Return the Airflow state of the run, or None if it can't be fetched."""
+    """Return the Airflow state of the run, or None if it can't be fetched.
+
+    Same session-login dance as trigger_dag.py (scrape CSRF token, POST /login, reuse the
+    cookie) because the REST API refuses basic auth. Returning None on *any* problem —
+    missing creds, non-200 — lets the caller treat "unknown" as "try again next tick"
+    rather than as a failure.
+    """
     s = _load_secrets()
     base = s.get("AIRFLOW_URL", "http://localhost:33013").rstrip("/")
     user, pw = s.get("AIRFLOW_USER"), s.get("AIRFLOW_PASS")
@@ -97,6 +111,12 @@ def _airflow_run_state(run_id: str) -> str | None:
 
 
 def _age_seconds(iso: str) -> float:
+    """How many seconds ago was this ISO-8601 timestamp? (0.0 if it can't be parsed.)
+
+    Used to enforce the give-up timeout: if a queued run never reaches a terminal state we
+    don't poll it forever. Normalising the trailing "Z" to "+00:00" makes fromisoformat
+    accept the UTC timestamps the hook writes.
+    """
     try:
         started = datetime.fromisoformat(iso.replace("Z", "+00:00"))
     except ValueError:
@@ -105,18 +125,32 @@ def _age_seconds(iso: str) -> float:
 
 
 def reconcile() -> None:
+    """One reconciliation pass: resolve the latest deploy's retrain to a terminal outcome.
+
+    Called once per deploy-timer tick. It's designed to be cheap and idempotent — it does
+    at most one Airflow poll and writes at most one outcome record, then returns; the next
+    tick continues where this left off.
+    """
     runs = _read_jsonl(_runs_path())
     if not runs:
         return
+    # We only track the most recent deploy — a newer deploy supersedes watching an older
+    # one, and each deploy's retrain is short-lived relative to the deploy cadence.
     latest = runs[-1]
     run_id = latest.get("dag_run_id")
     if not run_id:
         return  # this deploy didn't queue a retrain — nothing to watch
 
+    # Idempotency guard: if we've already written a terminal outcome for this run, stop.
+    # This is what makes it safe to call every tick without duplicating records.
     done = {r.get("dag_run_id") for r in _read_jsonl(_retrain_path())}
     if run_id in done:
         return  # already reconciled to a terminal outcome
 
+    # Decide this tick's verdict. Three outcomes:
+    #   - the run finished (success/failed)  -> record that state
+    #   - it's overrun the timeout           -> record "timeout" so the UI stops "running"
+    #   - still in progress / unreachable    -> record nothing, retry next tick
     state = _airflow_run_state(run_id)
     timeout = float(os.getenv("RETRAIN_TIMEOUT_SECONDS", "1800"))
     outcome: str | None = None

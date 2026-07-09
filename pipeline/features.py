@@ -31,11 +31,33 @@ log = logging.getLogger("pipeline.features")
 
 FEATURESET_TABLE = os.getenv("FEATURESET_TABLE", "featureset_v1")
 
-# One row per delivered order. CTEs aggregate items (with product+seller joins)
-# and payments to order grain; the outer query derives purchase-time windows and
-# calendar features. Postgres mode()/stddev_samp give the categorical mode and
-# per-order dispersion the contract expects. Base tables are schema-qualified with
-# RAW_SCHEMA so the query reads the raw layer regardless of search_path.
+# The heart of feature engineering: one big, auditable SQL statement that turns the
+# raw Olist tables into exactly one row per delivered order, with the ~45 purchase-time
+# features the model expects. Doing this in SQL (not pandas) keeps the transformation
+# close to the data, fast, and reproducible — anyone can run the query and see how each
+# feature is derived.
+#
+# Structure (read top-to-bottom):
+#   - CTE `item_products` : joins order_items to products + sellers, one row per line-item.
+#   - CTE `item_agg`      : aggregates those line-items up to order grain (sum/avg/max/
+#                           std, plus mode() for categoricals like the dominant seller state).
+#   - CTE `pay_agg`       : aggregates payments to order grain (count, modal type, max installments).
+#   - outer SELECT        : joins the aggregates back to orders and derives the calendar and
+#                           delivery-window features from the purchase timestamp.
+#
+# Postgres specifics worth knowing:
+#   - `mode() WITHIN GROUP (ORDER BY col)` = the most frequent value (categorical mode).
+#   - `stddev_samp` = sample standard deviation (NULL for a single-item order — matches
+#     the Optional std fields in the API schema).
+#   - Base tables are schema-qualified with RAW_SCHEMA so the query reads the raw layer
+#     no matter what the connection's search_path is.
+#
+# TEMPORAL-LEAKAGE FIREWALL (this is the first and most important layer): every column
+# in the SELECT is knowable at/around purchase time. `order_estimated_delivery_date`
+# and `shipping_limit_date` are *commitments made at checkout*, so windows derived from
+# them are legal features. The one use of the actual delivered date is to compute the
+# TARGET `is_late_delivery` — never a feature. `order_delivered_*` and `review_*` columns
+# are deliberately absent from X.
 FEATURE_SQL = f"""
 WITH item_products AS (
     SELECT oi.order_id, oi.product_id, oi.seller_id,
@@ -132,20 +154,39 @@ WHERE o.order_status = 'delivered'
   AND o.order_approved_at            IS NOT NULL
 """
 
-# Non-feature columns the query also emits.
+# Columns the query emits that are NOT model features: the id, the target, and the
+# timestamp used only to make the temporal train/valid split. We track them separately
+# so the contract check below can distinguish "features" from "everything else".
 _EXTRA_COLUMNS = ["order_id", "is_late_delivery", "purchase_ts"]
 
 
 def _artifact_path() -> Path:
+    """Where the CSV snapshot of the featureset is written (env-overridable)."""
     return Path(os.getenv("FEATURESET_PATH", "artifacts/featureset_v1.csv"))
 
 
 def build(write_csv: bool = True) -> pd.DataFrame:
+    """Run the feature SQL, materialise it as a table, validate it, and snapshot to CSV.
+
+    Returns the feature DataFrame. The steps, and why each exists:
+      1. Materialise the query as a real table (CREATE TABLE AS) in the features schema
+         so downstream steps (train, batch-predict) can query it directly instead of
+         re-running this expensive SQL.
+      2. Read it back into pandas.
+      3. Contract check — assert the produced feature columns exactly match
+         ``app.config.FEATURE_COLUMNS``. This is a guardrail: if someone edits the SQL
+         and drifts from the API/model contract, the build fails loudly here rather than
+         silently shipping a mismatched model.
+      4. Log the label balance (what fraction is late) — crucial context, because the
+         low positive rate drives the choice of PR-AUC and class weighting in training.
+      5. Optionally write a CSV artifact for offline analysis / the joblib fallback path.
+    """
     engine = get_engine()
     ensure_schema(FEATURES_SCHEMA)
     qualified = f'"{FEATURES_SCHEMA}"."{FEATURESET_TABLE}"'
 
-    # Materialize as a table so Airflow / batch-predict can query it directly.
+    # Drop-then-create makes the build idempotent (safe for Airflow retries), and
+    # materialising as a table (rather than a view) means downstream reads are cheap.
     with engine.begin() as conn:
         conn.execute(text(f"DROP TABLE IF EXISTS {qualified}"))
         conn.execute(text(f"CREATE TABLE {qualified} AS {FEATURE_SQL}"))
@@ -154,7 +195,9 @@ def build(write_csv: bool = True) -> pd.DataFrame:
 
     frame = pd.read_sql_table(FEATURESET_TABLE, engine, schema=FEATURES_SCHEMA)
 
-    # The contract is authoritative: fail loudly if the produced feature set drifts.
+    # The API/model contract (config.FEATURE_COLUMNS) is the single source of truth.
+    # Compare as sets so order doesn't matter here; report both directions of drift so
+    # a failure message tells you exactly what to fix.
     produced = set(frame.columns) - set(_EXTRA_COLUMNS)
     expected = set(FEATURE_COLUMNS)
     if produced != expected:
@@ -163,9 +206,12 @@ def build(write_csv: bool = True) -> pd.DataFrame:
             f"  missing (in contract, not produced): {sorted(expected - produced)}\n"
             f"  extra   (produced, not in contract): {sorted(produced - expected)}"
         )
-    # Reorder to contract order + extras for a stable, readable artifact.
+    # Now pin the *order* to the contract order (+ extras) so the artifact is stable and
+    # diffs cleanly across runs.
     frame = frame[[*FEATURE_COLUMNS, *_EXTRA_COLUMNS]]
 
+    # The label balance is a first-class diagnostic: ~8% late means a heavily imbalanced
+    # problem, which is exactly why training optimises PR-AUC and uses class weights.
     late_rate = frame["is_late_delivery"].mean()
     log.info("label balance: is_late_delivery mean=%.4f (%d late / %d total)",
              late_rate, int(frame["is_late_delivery"].sum()), len(frame))
@@ -180,6 +226,7 @@ def build(write_csv: bool = True) -> pd.DataFrame:
 
 
 def main() -> None:
+    """CLI entry point (``python -m pipeline.features``): build the featureset."""
     build()
 
 

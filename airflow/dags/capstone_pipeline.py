@@ -56,6 +56,9 @@ def _decide_retrain(**context) -> str:
     return "flag_retrain" if flag.endswith("true") else "no_retrain"
 
 
+# Defaults applied to every task unless overridden. retries=0 keeps a failing step
+# failing fast and visibly (rather than masking a real problem behind auto-retries)
+# during a graded demo; retry_delay is set anyway so it's easy to flip retries on.
 default_args = {
     "owner": GROUP,
     "depends_on_past": False,
@@ -63,6 +66,9 @@ default_args = {
     "retry_delay": timedelta(minutes=2),
 }
 
+# schedule=None + catchup=False => this DAG only runs when triggered manually (from the
+# UI or CLI). It's an on-demand operational pipeline for the demo, not a cron job, so we
+# don't want Airflow backfilling missed runs from start_date to now.
 with DAG(
     dag_id="delivery_capstone_workflow",
     description="Delivery Olist late-delivery MLOps pipeline (SSH bridge to VM).",
@@ -73,6 +79,9 @@ with DAG(
     tags=["delivery", "delivery", "mlops", "delivery-risk"],
 ) as dag:
 
+    # Each step is a BashOperator whose command is a `step("pipeline.X")` string — i.e.
+    # "run `python -m pipeline.X` on the group VM via the SSH bridge". The worker itself
+    # does no data work; it just fires these remote commands and reacts to their exit code.
     load_raw_data = BashOperator(
         task_id="load_raw_data",
         bash_command=step("pipeline.load_raw"),
@@ -110,11 +119,16 @@ with DAG(
         do_xcom_push=True,
     )
 
+    # A branch operator returns the task_id of whichever downstream branch to run; the
+    # other branch is skipped. This is how the monitor verdict controls the DAG's shape.
     decide_retrain = BranchPythonOperator(
         task_id="decide_retrain",
         python_callable=_decide_retrain,
     )
 
+    # The two branches are deliberately just echoes: this pipeline *surfaces* the retrain
+    # decision, it doesn't auto-retrain (that would retrain on the data we just trained on).
+    # Retraining stays a human-initiated action; these tasks make the verdict visible.
     flag_retrain = BashOperator(
         task_id="flag_retrain",
         bash_command="echo 'drift/decay detected -> retrain recommended'",
@@ -125,6 +139,8 @@ with DAG(
         bash_command="echo 'within thresholds -> no retrain needed'",
     )
 
+    # The `>>` operator wires task dependencies (left runs before right). The final
+    # `[flag_retrain, no_retrain]` is the fan-out the branch operator chooses between.
     (
         load_raw_data
         >> build_features

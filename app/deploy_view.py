@@ -1,7 +1,12 @@
 """Minimal standalone HTML for GET /deploy-status?format=html.
 
 Hand-rolled (no template engine, no new dependency) — the deploy view is a small
-read-only table, so an f-string with escaped values is the right amount of tool.
+read-only table plus an SVG flowchart, so a plain f-string with HTML-escaped values
+is the right amount of tool. Pulling in Jinja2 for this would be over-engineering.
+
+Security note: every value that comes from the run records is passed through
+``html.escape`` before being interpolated, so a crafted commit message or path can't
+inject markup (defence against stored XSS in an internal dashboard).
 """
 from __future__ import annotations
 
@@ -9,7 +14,10 @@ from html import escape
 
 from . import deploy_status
 
-# flowchart node colours by step state
+# The palette below maps each abstract node *state* (computed in deploy_status.py) to
+# concrete presentation. Keeping colours here — not in the logic module — keeps the
+# "what happened" model separate from "how it looks".
+# flowchart node fill colour by step state (green=ok, red=failed, amber=warn, blue=in-flight)
 _STEP_FILL = {
     "ok": "#2e7d32", "failed": "#c62828", "warn": "#f9a825",
     "running": "#1565c0", "queued": "#1565c0",
@@ -33,6 +41,7 @@ _STATUS_COLOR = {
 
 
 def _badge(status: str) -> str:
+    """Render an overall-status word as a small coloured pill (e.g. green "success")."""
     color = _STATUS_COLOR.get(status, "#757575")
     return (
         f'<span style="background:{color};color:#fff;padding:2px 8px;'
@@ -41,6 +50,9 @@ def _badge(status: str) -> str:
 
 
 def _actions(actions: dict) -> str:
+    """Format the per-deploy action map ({restart: ok, trigger: queued, ...}) as a
+    compact "key=value · key=value" string for the history table. ``&mdash;`` (an em
+    dash) stands in for "no actions recorded"."""
     if not actions:
         return "&mdash;"
     parts = [f"{escape(str(k))}={escape(str(v))}" for k, v in actions.items()]
@@ -48,6 +60,11 @@ def _actions(actions: dict) -> str:
 
 
 def _row(rec: dict) -> str:
+    """Build one <tr> of the recent-deploys table from a run record.
+
+    Each field is escaped and given a sensible fallback so a sparse record still
+    renders cleanly. The commit is shortened to 7 chars (the conventional short SHA).
+    """
     commit = escape((rec.get("new_commit") or "")[:7]) or "&mdash;"
     changed = rec.get("changed_paths") or []
     changed_txt = escape(", ".join(changed)) if changed else "&mdash;"
@@ -64,6 +81,12 @@ def _row(rec: dict) -> str:
 
 
 def _svg_node(x: int, y: int, step: dict, w: int = 150, h: int = 46) -> str:
+    """Emit one rounded rectangle + two lines of centred text for a flowchart node.
+
+    We draw raw SVG primitives (``<rect>``/``<text>``) rather than pulling in a chart
+    library: the diagram is a handful of fixed boxes, so hand-placing them by (x, y)
+    is simplest. ``cx`` centres the labels horizontally within the box.
+    """
     fill = _STEP_FILL.get(step["state"], "#bdbdbd")
     text = _STEP_TEXT.get(step["state"], "#fff")
     cx = x + w // 2
@@ -80,6 +103,8 @@ def _svg_node(x: int, y: int, step: dict, w: int = 150, h: int = 46) -> str:
 
 
 def _arrow(x1: int, y1: int, x2: int, y2: int) -> str:
+    """A connector line between two nodes, ending in the arrowhead marker defined once
+    in the SVG ``<defs>`` (referenced via ``marker-end``)."""
     return f'<line x1="{x1}" y1="{y1}" x2="{x2}" y2="{y2}" stroke="#9e9e9e" stroke-width="2" marker-end="url(#arrow)"/>'
 
 
@@ -89,14 +114,17 @@ def render_flowchart_svg(record) -> str:
     Layout: three gate steps left-to-right, then the test gate branches into the
     three conditional actions stacked on the right.
     """
+    # Ask the logic module for node states, then this function is pure layout: fixed
+    # pixel coordinates for the gate chain (left), the action column (right), and the
+    # async retrain node (far right). All the "what colour" decisions already happened.
     steps = deploy_status.deploy_steps(record)
     gate, actions = steps["gate"], steps["actions"]
     retrain = steps.get("retrain")
-    w, h = 150, 46
-    gate_x = [10, 200, 390]
-    gate_y = 97
-    act_x = 620
-    act_y = [15, 97, 179]
+    w, h = 150, 46            # node width/height, reused for arrow anchor maths
+    gate_x = [10, 200, 390]   # x of each of the 3 gate nodes, left-to-right
+    gate_y = 97               # gate row sits vertically centred in the canvas
+    act_x = 620               # the 3 action nodes share this x (a vertical column)
+    act_y = [15, 97, 179]     # y of each action node, top-to-bottom
     retrain_x = 810  # sits to the right of the Trigger Airflow action (actions[1])
 
     parts = [
@@ -106,18 +134,21 @@ def render_flowchart_svg(record) -> str:
         'markerWidth="7" markerHeight="7" orient="auto-start-reverse">'
         '<path d="M0,0 L10,5 L0,10 z" fill="#9e9e9e"/></marker></defs>',
     ]
-    # gate chain + connecting arrows
+    # Draw the 3 gate nodes in a row, joining each to the previous with an arrow (the
+    # arrow starts at the right edge of node i-1 and ends at the left edge of node i).
     for i, step in enumerate(gate):
         parts.append(_svg_node(gate_x[i], gate_y, step))
         if i > 0:
             parts.append(_arrow(gate_x[i - 1] + w, gate_y + h // 2, gate_x[i], gate_y + h // 2))
-    # branch from the test gate into each action node
+    # The test gate (last gate node) fans out to all three action nodes — one arrow
+    # each — visually expressing "these actions run only after the gate passes".
     branch_x = gate_x[2] + w
     branch_y = gate_y + h // 2
     for i, step in enumerate(actions):
         parts.append(_arrow(branch_x, branch_y, act_x, act_y[i] + h // 2))
         parts.append(_svg_node(act_x, act_y[i], step))
-    # retrain is the async child of the Trigger Airflow action (actions[1], middle)
+    # The retrain node hangs off the middle action ("Trigger Airflow", actions[1])
+    # because a retrain is the *async child* of that trigger, resolved later.
     if retrain:
         trig_y = act_y[1] + h // 2
         parts.append(_arrow(act_x + w, trig_y, retrain_x, trig_y))
@@ -127,6 +158,9 @@ def render_flowchart_svg(record) -> str:
 
 
 def render_deploy_html(snapshot: dict) -> str:
+    """Assemble the full HTML page from a deploy snapshot: a headline, the pipeline
+    flowchart, a colour legend, and the recent-deploys table. Handles the empty case
+    (no deploys yet) with an explanatory message instead of a broken layout."""
     latest = snapshot.get("latest")
     recent = snapshot.get("recent", [])
     overall = snapshot.get("status", "unknown")

@@ -1,3 +1,11 @@
+"""Contract + observability tests for the delivery-risk FastAPI service.
+
+These are the tests the CD hook gates on (a red run blocks every deploy), so they encode
+the *graded* guarantees: the endpoint set and response shape, the temporal-leakage
+firewall, the metrics roll-up, and the deploy-status reporting. They run entirely
+in-process via FastAPI's TestClient — no real server, DB, or MLflow needed — which is why
+they're fast and safe to run on every commit.
+"""
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
@@ -5,7 +13,9 @@ from pydantic import ValidationError
 from app.main import app
 from app.schemas import PredictionInput
 
-# A complete, valid purchase-time payload (featureset_v1 contract).
+# A complete, valid purchase-time payload (featureset_v1 contract). Deliberately contains
+# ONLY features known at order-purchase time — no delivery outcome, no review — so it
+# doubles as the positive control for the leakage-firewall test below.
 VALID_PAYLOAD = {
     'order_id': 'x-1',
     'payment_count': 1, 'payment_type_mode': 'credit_card', 'max_installments': 3.0,
@@ -30,6 +40,13 @@ VALID_PAYLOAD = {
 
 
 def test_health_and_contract():
+    """The core graded contract: required endpoints exist and /predict returns the exact
+    agreed keys with valid values.
+
+    Using `with TestClient(app)` (as a context manager) is important — it triggers the
+    app's startup/shutdown events, which is what loads the model. `<=` is the subset
+    operator: we assert every required route is present, tolerating extra routes.
+    """
     with TestClient(app) as client:
         routes = {route.path for route in app.routes}
         assert {'/health', '/predict', '/batch-predict', '/metrics', '/metrics-summary', '/model-info'} <= routes
@@ -37,30 +54,50 @@ def test_health_and_contract():
         response = client.post('/predict', json=VALID_PAYLOAD)
         assert response.status_code == 200
         body = response.json()
+        # Exact-set equality (not subset): the response must contain these keys and no
+        # others, so the contract can't silently grow or drop a field.
         assert set(body) == {
             'order_id', 'late_delivery_probability', 'risk_level',
             'recommended_action', 'model_version', 'latency',
         }
+        # A probability must be a real probability, and the risk level must be one of the
+        # three buckets the ops team acts on.
         assert 0.0 <= body['late_delivery_probability'] <= 1.0
         assert body['risk_level'] in {'low', 'medium', 'high'}
 
-        # A prediction has resolved the model, so /health reports a serving state.
+        # Having served a prediction, the model is resolved, so /health should now report a
+        # healthy serving state and disclose which backend it loaded (MLflow/joblib/baseline).
         health = client.get('/health').json()
         assert health['status'] == 'ok'
         assert 'model_source' in health
 
+        # /model-info must advertise the temporal-leakage policy verbatim — this string is
+        # part of the graded contract, evidence the firewall is a stated guarantee.
         info = client.get('/model-info').json()
         assert info['temporal_leakage_policy'] == 'purchase-time features only'
 
 
 def test_leakage_firewall_rejects_outcome_fields():
-    # Delivery-outcome / review fields must never be accepted as inputs.
+    """Temporal-leakage firewall (graded): outcome fields must be *rejected*, not ignored.
+
+    The schema is configured to forbid extra fields, so submitting a known
+    delivery-outcome/review field raises a ValidationError. We test at the schema level
+    (not via HTTP) to prove the rejection is intrinsic to the input contract itself —
+    there's no way to sneak a future-knowledge feature past the model.
+    """
     for leaky in ('is_late_delivery', 'actual_delivery_days', 'review_score'):
         with pytest.raises(ValidationError):
             PredictionInput(**{**VALID_PAYLOAD, leaky: 1})
 
 
 def test_metrics_summary_rollup():
+    """Observability: predictions are counted and both metrics views expose them.
+
+    We drive 1 single + 2 batch predictions (3 total), then assert the human-readable
+    /metrics-summary rolls those up AND the Prometheus /metrics exposition text carries the
+    expected metric names. `>=` (not `==`) because metrics accumulate across the process:
+    other tests sharing this app instance may have already bumped the counters.
+    """
     with TestClient(app) as client:
         client.post('/predict', json=VALID_PAYLOAD)
         client.post('/batch-predict', json=[VALID_PAYLOAD, VALID_PAYLOAD])
@@ -72,6 +109,9 @@ def test_metrics_summary_rollup():
         assert '/predict' in summary['requests_by_endpoint']
         assert summary['http_requests_total'] >= 3
 
+        # The raw Prometheus endpoint must expose the same signals under our delivery_* metric
+        # names (the prefix namespaces them so they don't collide with other groups' metrics
+        # on the shared Prometheus).
         body = client.get('/metrics').text
         assert 'delivery_predictions_total' in body
         assert 'delivery_prediction_latency_seconds' in body
@@ -79,18 +119,29 @@ def test_metrics_summary_rollup():
 
 
 def test_deploy_status_unknown_without_runlog(tmp_path, monkeypatch):
-    # With no CD-hook run-log the endpoint must degrade to 'unknown', never error,
-    # so deploy monitoring can't affect serving.
+    """Deploy monitoring must fail *soft*: a missing run-log yields 'unknown', not a 500.
+
+    monkeypatch points the config at a non-existent file (auto-cleaned tmp_path) so we can
+    simulate "CD hook has never run here" without touching the real log. The principle: an
+    observability feature must never be able to take down the serving path.
+    """
     from app import config
     monkeypatch.setattr(config, 'DEPLOY_RUNS_PATH', str(tmp_path / 'absent.jsonl'))
     with TestClient(app) as client:
         body = client.get('/deploy-status').json()
         assert body['status'] == 'unknown'
         assert body['latest'] is None and body['recent'] == []
+        # The gauge still exports, reading 0.0 for the "unknown" state.
         assert 'delivery_deploy_last_status 0.0' in client.get('/metrics').text
 
 
 def test_deploy_status_reports_latest_run(tmp_path, monkeypatch):
+    """Given a two-line run-log, the endpoint reports the *newest* run and renders HTML.
+
+    We seed a synthetic JSONL log (a failed deploy followed by a successful one) and assert
+    the endpoint surfaces the latest, both as JSON and as the HTML dashboard (inline SVG
+    flowchart), and that the Prometheus gauges reflect the latest commit/status.
+    """
     import json
     from app import config
     runlog = tmp_path / 'deploy-runs.jsonl'
@@ -123,6 +174,13 @@ def test_deploy_status_reports_latest_run(tmp_path, monkeypatch):
 
 
 def test_deploy_status_reconciles_retrain_outcome(tmp_path, monkeypatch):
+    """The async retrain outcome is joined back to its deploy by dag_run_id.
+
+    This mirrors the real fire-and-forget flow: a deploy records a *queued* retrain, so the
+    status shows 'running'; later the watcher appends a terminal outcome keyed by the same
+    dag_run_id, and the endpoint must then reconcile the deploy to 'success'. We assert both
+    stages, including the Prometheus gauge flipping 0.0 -> 1.0.
+    """
     import json
     from app import config
     runlog = tmp_path / 'deploy-runs.jsonl'
@@ -153,12 +211,15 @@ def test_deploy_status_reconciles_retrain_outcome(tmp_path, monkeypatch):
 
 
 def test_logging_and_error_observability():
+    """Requests are traceable (correlation id) and errors are both rejected and counted."""
     with TestClient(app) as client:
-        # Every response carries a correlation id.
+        # Every response carries an X-Request-ID so a single request can be traced across
+        # the access log and any downstream systems — the backbone of debuggable services.
         ok = client.post('/predict', json=VALID_PAYLOAD)
         assert ok.headers.get('X-Request-ID')
 
-        # A leaky field is a 400 and is counted as an HTTP error.
+        # A leaky field is rejected (400/422 validation error) AND increments the error
+        # counter — so bad input is observable in metrics, not just silently refused.
         bad = client.post('/predict', json={**VALID_PAYLOAD, 'is_late_delivery': 1})
         assert bad.status_code in (400, 422)
 

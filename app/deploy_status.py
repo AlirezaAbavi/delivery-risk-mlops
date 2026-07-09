@@ -1,12 +1,15 @@
 """Read the CD-hook run records so the API can report deployment status.
 
-``ci/deploy_hook.sh`` appends one JSON object per deploy attempt to
-``DEPLOY_RUNS_PATH`` (default ``~/deploy-runs.jsonl``). This module reads that
-file **on demand** — no background thread, no in-memory state, never writes —
-so it always reflects the latest completed deploy and survives the very API
-restart that a deploy triggers. A missing or malformed file degrades to an
-``unknown`` status rather than raising, so deploy monitoring can never affect
-prediction serving.
+Design idea (event-sourcing-lite): the CD hook (``ci/deploy_hook.sh``) is the only
+*writer* — it appends one JSON object per deploy attempt to ``DEPLOY_RUNS_PATH``
+(default ``~/deploy-runs.jsonl``, one JSON per line = "JSONL"). This module is a pure
+*reader*: it parses that file **on demand**, holds no in-memory state, and never
+writes. Two nice properties fall out of that split:
+
+  - It always reflects the latest completed deploy, and it survives the very API
+    restart that a deploy triggers (the file outlives the process).
+  - A missing/corrupt file degrades to an ``unknown`` status instead of raising, so
+    the deploy-monitoring feature can never take down prediction serving.
 """
 from __future__ import annotations
 
@@ -18,15 +21,19 @@ from . import config
 
 log = logging.getLogger("api.deploy_status")
 
-# statuses the hook writes when a deploy did not fully succeed
+# The set of ``status`` strings the hook writes when a deploy did NOT fully succeed.
+# Anything not in here (in practice "success") is treated as a good deploy.
 _FAILURE_STATUSES = {"tests_failed", "ff_failed", "fetch_failed", "error"}
 
 
 def _read_records(limit: int) -> list[dict]:
     """Return up to ``limit`` most-recent run records, newest last.
 
-    Reads the whole (small, deploy-frequency) file and keeps the tail. Any line
-    that isn't valid JSON is skipped, so a partially written last line is safe.
+    The file is tiny (one line per deploy, and deploys are infrequent), so reading it
+    whole and slicing the tail is simpler and fast enough. Every line is parsed
+    defensively: a line that isn't valid JSON is skipped, which makes a half-written
+    final line (a deploy caught mid-append) harmless. Distinct except branches:
+    missing file -> empty (normal on a fresh box); unreadable -> log + empty.
     """
     path = config.DEPLOY_RUNS_PATH
     records: list[dict] = []
@@ -39,7 +46,7 @@ def _read_records(limit: int) -> list[dict]:
                 try:
                     records.append(json.loads(line))
                 except json.JSONDecodeError:
-                    continue
+                    continue  # skip a corrupt/partial line rather than fail the read
     except FileNotFoundError:
         return []
     except OSError as exc:  # unreadable file — report unknown, never crash
@@ -49,7 +56,13 @@ def _read_records(limit: int) -> list[dict]:
 
 
 def _read_retrain() -> dict:
-    """Map dag_run_id -> retrain outcome record (written by ci/watch_dag.py)."""
+    """Build a {dag_run_id -> retrain outcome record} map from the retrain log.
+
+    Retrains are asynchronous: a deploy *queues* an Airflow DAG run and moves on;
+    ``ci/watch_dag.py`` later appends the terminal outcome keyed by ``dag_run_id``.
+    Keying by run id lets us reconcile a deploy record with its (possibly much later)
+    retrain result. "Last write wins" so a corrected outcome supersedes an earlier one.
+    """
     out: dict[str, dict] = {}
     try:
         with open(config.DEPLOY_RETRAIN_PATH, encoding="utf-8") as fh:
@@ -70,10 +83,12 @@ def _read_retrain() -> dict:
 
 
 def retrain_state_for(record: Optional[dict]) -> Optional[str]:
-    """Retrain state for a deploy: None (none queued) | running | success | failed | timeout.
+    """Resolve a deploy's retrain state: None | running | success | failed | timeout.
 
-    A deploy that queued a DAG run but has no terminal outcome recorded yet is
-    reported as ``running`` — the tick reconciler fills the outcome in later.
+    Logic: a deploy that never queued a DAG run has no retrain (None). One that queued
+    a run but has no terminal record yet is "running" — the async watcher fills the
+    outcome in later. Otherwise we return the recorded terminal state. This is what
+    lets the UI honestly show "running" instead of prematurely claiming success.
     """
     if not record:
         return None
@@ -85,11 +100,19 @@ def retrain_state_for(record: Optional[dict]) -> Optional[str]:
 
 
 def is_success(record: Optional[dict]) -> bool:
+    """True only when a record exists and its status is exactly 'success'."""
     return bool(record) and record.get("status") == "success"
 
 
 def snapshot(history_limit: Optional[int] = None) -> dict:
-    """Full view for /deploy-status: latest run + recent history + counts."""
+    """Full view for /deploy-status: latest run + recent history + counts.
+
+    This is the single object the endpoint and the metrics refresher both consume.
+    When there are no records at all we return a well-formed ``unknown`` snapshot (not
+    an error) so every caller can rely on the same shape. The latest record is
+    enriched with its reconciled ``retrain`` block; ``recent`` is reversed to
+    newest-first for display.
+    """
     limit = config.DEPLOY_HISTORY_LIMIT if history_limit is None else history_limit
     recent = _read_records(limit)
     if not recent:
@@ -100,7 +123,7 @@ def snapshot(history_limit: Optional[int] = None) -> dict:
             "recent": [],
             "total_recorded": 0,
         }
-    latest = dict(recent[-1])
+    latest = dict(recent[-1])  # copy so we don't mutate the cached-read list element
     latest["retrain"] = {"dag_run_id": latest.get("dag_run_id"), "state": retrain_state_for(latest)}
     return {
         "status": latest.get("status", "unknown"),
@@ -111,7 +134,11 @@ def snapshot(history_limit: Optional[int] = None) -> dict:
 
 
 def latest() -> Optional[dict]:
-    """The single most-recent run record, or None if there are none."""
+    """The single most-recent run record, or None if there are none.
+
+    Cheaper than ``snapshot`` when a caller only needs the last deploy (asks the reader
+    for just the tail record).
+    """
     recent = _read_records(1)
     return recent[-1] if recent else None
 
@@ -119,9 +146,11 @@ def latest() -> Optional[dict]:
 def latest_retrain() -> Optional[dict]:
     """Most recent deploy that queued a retrain, with its reconciled state.
 
-    Used by the Grafana gauges so the retrain status persists across later
-    non-retrain deploys (a docs/dashboard push shouldn't blank the panel). The
-    per-deploy flowchart stays scoped to the latest deploy instead.
+    Note the deliberate difference from ``latest()``: we scan *backwards* for the last
+    deploy that actually had a ``dag_run_id``. The Grafana retrain gauges use this so
+    the panel keeps showing the last real retrain outcome even across later deploys
+    that didn't retrain (e.g. a docs-only push shouldn't blank the retrain panel). The
+    per-deploy flowchart, by contrast, stays scoped to the single latest deploy.
     """
     for rec in reversed(_read_records(config.DEPLOY_HISTORY_LIMIT)):
         if rec.get("dag_run_id"):
@@ -134,18 +163,30 @@ def latest_retrain() -> Optional[dict]:
 
 
 # --- flowchart model -------------------------------------------------------
-# The deploy hook runs a fixed pipeline: fetch a new commit -> fast-forward ->
-# test gate -> then, per changed paths, restart the API / trigger Airflow /
-# import Grafana. deploy_steps() maps a run record onto that pipeline so the UI
-# can draw it as a DAG with each node coloured by outcome.
+# The HTML view draws the deploy as a small DAG. The hook always runs the same fixed
+# pipeline: fetch a new commit -> fast-forward the checkout -> run the test gate ->
+# then, depending on which paths changed, restart the API / trigger Airflow / import
+# Grafana. The functions below translate one run *record* into per-node states so the
+# renderer (deploy_view.py) can colour each box by what actually happened.
 #
-# state is one of: ok | failed | warn | skipped | pending
+# Every node ends up in one of: ok | failed | warn | skipped | pending (| queued | running)
 
+# The three sequential "gate" steps and the JSON keys that describe them.
 _GATE = [("New commit", "fetch"), ("Fast-forward", "ff"), ("Test gate", "tests")]
+# The three conditional "action" steps that only run after a green gate.
 _ACTIONS = [("Restart API", "restart"), ("Trigger Airflow", "trigger"), ("Import Grafana", "import")]
 
 
 def _gate_state(key: str, status: str) -> str:
+    """Colour a gate node given the overall run status.
+
+    Reasoning encoded here:
+      - fetch: a record exists at all only because we fetched and saw a new commit,
+        so this node is always "ok" once there's a record.
+      - ff: red only when the fast-forward itself failed.
+      - tests: if ff already failed we never reached the gate (skipped); otherwise red
+        on a test failure, green on success.
+    """
     if key == "fetch":
         return "ok"  # a record exists only because we fetched and saw a new commit
     if key == "ff":
@@ -158,6 +199,13 @@ def _gate_state(key: str, status: str) -> str:
 
 
 def _action_state(value: Optional[str], tests_passed: bool) -> str:
+    """Colour a conditional action node from its recorded value.
+
+    Actions are only attempted after a green test gate; before that they're "skipped".
+    The recorded value is a short string the hook wrote ("ok"/"no"/"queued"/a failure
+    word), which we map to a node state. "queued" is special: a fire-and-forget
+    Airflow trigger whose real outcome shows up later on the separate retrain node.
+    """
     if not tests_passed:
         return "skipped"  # actions only run after a green test gate
     v = (value or "no").lower()
@@ -172,12 +220,18 @@ def _action_state(value: Optional[str], tests_passed: bool) -> str:
     return "warn"  # e.g. restarted-but-health-unconfirmed
 
 
-# map a retrain outcome onto a flowchart node state
+# Map an async retrain outcome onto a flowchart node state (colour).
 _RETRAIN_NODE = {"success": "ok", "failed": "failed", "timeout": "warn", "running": "running"}
 
 
 def deploy_steps(record: Optional[dict]) -> dict:
-    """Per-step pipeline states for the flowchart view, from a run record."""
+    """Turn one run record into the per-node state dict the SVG renderer consumes.
+
+    With no record everything is "pending" (nothing has run). Otherwise we compute
+    each gate node, each action node (gated on ``tests_passed``), and the async retrain
+    node. The renderer never has to know the deploy semantics — all the judgement lives
+    here, cleanly separated from the drawing code.
+    """
     if not record:
         return {
             "gate": [{"name": n, "state": "pending", "detail": ""} for n, _ in _GATE],
@@ -195,7 +249,7 @@ def deploy_steps(record: Optional[dict]) -> dict:
             {
                 "name": n,
                 "state": _action_state(actions.get(k), tests_passed),
-                "detail": str(actions.get(k, "no")),
+                "detail": str(actions.get(k, "no")),  # full value shown in the table
             }
             for n, k in _ACTIONS
         ],

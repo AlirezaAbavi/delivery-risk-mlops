@@ -11,7 +11,9 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# Install deps first so this layer caches across code changes.
+# Install deps first, as their own layer, BEFORE copying source. Docker caches layers by
+# their inputs, so as long as requirements.txt is unchanged this expensive pip step is
+# reused — editing app code only busts the cheap COPY layer below, not the install.
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
@@ -24,6 +26,10 @@ USER appuser
 
 EXPOSE 8112
 
+# Container-native liveness: Docker/orchestrators poll /health and mark the container
+# unhealthy after 3 failed checks. start-period gives the model time to load before the
+# first check counts against us. We shell out to stdlib urllib so no extra tool (curl) is
+# required in the slim image.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8112/health').status==200 else 1)"
 

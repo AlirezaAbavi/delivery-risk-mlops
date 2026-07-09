@@ -49,7 +49,11 @@ write_record() {
 # finish records the run outcome, then exits — used at every post-detection exit.
 finish() { write_record "$1"; exit "$2"; }
 
-# Single-instance guard: never overlap two hook runs.
+# Single-instance guard: never overlap two hook runs. The timer fires every ~2 min,
+# but a deploy (tests + model reload) can take longer than that — without a lock a slow
+# run and the next tick could stomp on each other. flock -n grabs an exclusive advisory
+# lock on fd 9 and fails immediately (non-blocking) if another run already holds it, so
+# the late tick simply bows out rather than queueing up behind the first.
 exec 9>"$HOME/.deploy-hook.lock"
 flock -n 9 || { log "another run holds the lock; skipping"; exit 0; }
 
@@ -76,7 +80,9 @@ fi
 log "new commit $NEW (was $OLD) on $BRANCH; deploying"
 RECORD=1   # from here on every exit path records a run outcome via finish()
 
-# 2. changed paths (old..new).
+# 2. changed paths (old..new). This is the heart of the "change-gated" design: instead of
+# blindly restarting everything on every commit, we diff the two SHAs and later act ONLY
+# on the subsystems whose files actually moved (see the changed_matches checks below).
 CHANGED="$(git diff --name-only "$OLD" "$NEW")"
 
 # 3. fast-forward only (main is not rewritten under us).

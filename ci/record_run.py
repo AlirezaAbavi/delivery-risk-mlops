@@ -29,20 +29,29 @@ from pathlib import Path
 
 
 def _short(sha: str) -> str:
+    """Abbreviate a full commit SHA to its 7-char short form (empty stays empty)."""
     return sha[:7] if sha else ""
 
 
 def main() -> None:
+    # Every field arrives via environment variables (see module docstring) — that's what
+    # lets the bash hook pass arbitrary strings without worrying about shell quoting.
     new_commit = os.getenv("DR_NEW_COMMIT", "")
     finished_at = os.getenv("DR_FINISHED_AT", "")
 
+    # The hook passes changed paths newline-separated; split back into a clean list so the
+    # record stores real JSON array of paths rather than one blob string.
     changed = [p for p in os.getenv("DR_CHANGED_PATHS", "").splitlines() if p.strip()]
 
+    # Duration is numeric, but it came through the environment as text — coerce defensively
+    # so a malformed value degrades to 0 instead of crashing this best-effort logger.
     try:
         duration = int(os.getenv("DR_DURATION_SECONDS", "0") or "0")
     except ValueError:
         duration = 0
 
+    # Build one flat record. run_id = short-sha + finish-timestamp gives each deploy attempt
+    # a unique, human-readable handle (the same commit can be deployed more than once).
     record = {
         "run_id": f"{_short(new_commit)}-{finished_at}",
         "started_at": os.getenv("DR_STARTED_AT", ""),
@@ -62,6 +71,8 @@ def main() -> None:
         "host": os.uname().nodename,
     }
 
+    # Append one JSON object per line (JSONL): each deploy is a self-contained record, and
+    # the file is trivially tailable / streamable without parsing the whole thing.
     out = Path(os.path.expanduser(os.getenv("DEPLOY_RUNS_PATH", "~/deploy-runs.jsonl")))
     try:
         with out.open("a", encoding="utf-8") as fh:

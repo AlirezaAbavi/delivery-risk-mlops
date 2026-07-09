@@ -26,12 +26,15 @@ logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(
 log = logging.getLogger("pipeline.load_raw")
 
 
+# A small, declarative description of one CSV -> table load. Using a frozen dataclass
+# (immutable, hashable) turns "which files map to which tables, and which columns are
+# dates" into pure data the loader loops over — far clearer than a pile of if/elif.
 @dataclass(frozen=True)
 class RawTable:
     name: str          # destination Postgres table
     filename: str      # source CSV (without directory)
-    date_columns: tuple[str, ...] = ()
-    encoding: str = "utf-8"
+    date_columns: tuple[str, ...] = ()  # columns pandas should parse into real timestamps
+    encoding: str = "utf-8"             # some Olist files ship with a BOM (see below)
 
 
 # Destination table -> source file + which columns to parse as datetimes.
@@ -60,10 +63,24 @@ RAW_TABLES: tuple[RawTable, ...] = (
 
 
 def _data_dir() -> Path:
+    """Where the source CSVs live. Env-overridable so the same code finds the data on
+    a laptop and on the server (which may mount it elsewhere)."""
     return Path(os.getenv("RAW_DATA_DIR", "olist_data/olist_data"))
 
 
 def load_table(spec: RawTable, data_dir: Path) -> int:
+    """Load one CSV fully into its raw Postgres table; return the row count.
+
+    Key choices:
+      - Fail loudly if the file is missing (a silent partial load would corrupt every
+        downstream step).
+      - ``parse_dates`` converts date columns to real timestamps *at load time* so the
+        feature SQL can do date arithmetic without re-parsing strings.
+      - ``if_exists="replace"`` makes the load idempotent: re-running drops and rebuilds
+        the table, so an Airflow retry can't create duplicate rows.
+      - ``chunksize`` + ``method="multi"`` batch the INSERTs, which is dramatically
+        faster than row-by-row for the larger tables.
+    """
     path = data_dir / spec.filename
     if not path.exists():
         raise FileNotFoundError(f"missing source CSV: {path}")
@@ -71,7 +88,7 @@ def load_table(spec: RawTable, data_dir: Path) -> int:
     frame = pd.read_csv(
         path,
         encoding=spec.encoding,
-        parse_dates=list(spec.date_columns) or None,
+        parse_dates=list(spec.date_columns) or None,  # None => no date parsing
     )
     frame.to_sql(
         spec.name, get_engine(), schema=RAW_SCHEMA, if_exists="replace", index=False,
@@ -98,9 +115,17 @@ def clear_schema(schema: str) -> int:
 
 
 def load_all(tables: list[str] | None = None, clear: bool = False) -> dict[str, int]:
+    """Load every table (or a named subset) and return {table: row_count}.
+
+    Steps: validate the requested subset (fail fast on a typo'd table name), ensure the
+    raw schema exists, optionally wipe it first, then load each selected table. Returns
+    the per-table counts so a caller/Airflow task can assert the load looks sane.
+    """
     data_dir = _data_dir()
     selected = [t for t in RAW_TABLES if tables is None or t.name in tables]
     if tables:
+        # Guard against a caller asking for a table we don't know — better a clear error
+        # than silently loading nothing.
         missing = set(tables) - {t.name for t in RAW_TABLES}
         if missing:
             raise SystemExit(f"unknown table(s): {sorted(missing)}")
@@ -119,6 +144,9 @@ def load_all(tables: list[str] | None = None, clear: bool = False) -> dict[str, 
 
 
 def main() -> None:
+    """CLI entry point (``python -m pipeline.load_raw``). Exposes the table subset and
+    the ``--clear`` wipe as command-line flags so the step is usable both by hand and
+    from an Airflow BashOperator."""
     parser = argparse.ArgumentParser(description="Load raw Olist CSVs into Postgres.")
     parser.add_argument("--tables", nargs="*", help="subset of table names (default: all)")
     parser.add_argument("--clear", action="store_true",
