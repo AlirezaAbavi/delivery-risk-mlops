@@ -1,14 +1,14 @@
-"""Central configuration for the Delivery delivery-risk API.
+"""Central configuration for the Delivery-Risk MLOps API.
 
 Why a single config module?
     Everything the service needs to behave differently between environments
-    (your laptop vs. the course server) is read from environment variables *here*,
+    (your laptop vs. a deployed container) is read from environment variables *here*,
     in one place. Nothing else in the codebase calls ``os.getenv`` for these
     values. That is the "12-factor app" idea: the *same* built artifact/image runs
     everywhere and only the environment changes its behaviour — no code edits, no
     rebuilds, no secrets baked into the image.
 
-This module also holds two things that are part of the *graded* contract:
+This module also holds two things that are part of the API's public contract:
     1. ``FEATURE_COLUMNS`` — the exact purchase-time feature list (featureset_v1)
        the model was trained on. This is the "schema" the API promises callers.
     2. ``FORBIDDEN_FIELDS`` — the temporal-leakage denylist: outcome/review fields
@@ -22,22 +22,22 @@ from typing import List
 from dotenv import load_dotenv
 
 # Load key=value pairs from a local ``.env`` file into the process environment.
-# This is a no-op on the server (where real env vars are already set by systemd),
-# but on a laptop it lets you keep MLFLOW_TRACKING_URI, DB creds, etc. in a file
-# instead of exporting them by hand every session. Real values in ``.env`` are
+# In a container these are typically set by compose/orchestration already (a no-op
+# here), but on a laptop it lets you keep MLFLOW_TRACKING_URI, DB creds, etc. in a
+# file instead of exporting them by hand every session. Real values in ``.env`` are
 # gitignored; ``.env.example`` documents the shape without leaking secrets.
 load_dotenv()
 
-APP_TITLE = "MLOps Delivery delivery-risk API"
+APP_TITLE = "Delivery-Risk MLOps API"
 # The version string is surfaced in /model-info and the OpenAPI docs. We bump it by
-# hand on each meaningful change so an evaluator can tell which build is running.
+# hand on each meaningful change so you can tell which build is running.
 APP_VERSION = "1.2.0"  # deploy-monitoring: /deploy-status + delivery_deploy_* metrics + async retrain-outcome tracking
 
 # --- model source ----------------------------------------------------------
 # These four settings drive the model-resolution chain in model_loader.py:
 # MLflow registry first, then a local joblib file, then a safe arithmetic baseline.
 MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "http://127.0.0.1:5312")  # where the registry lives
-MODEL_NAME = os.getenv("MODEL_NAME", "delivery-risk")                    # registered model name
+MODEL_NAME = os.getenv("MODEL_NAME", "delivery-risk")                            # registered model name
 MODEL_STAGE = os.getenv("MODEL_STAGE", "Staging")                               # which stage alias to serve
 MODEL_PATH = os.getenv("MODEL_PATH")  # optional local joblib fallback; unset -> that fallback is skipped
 
@@ -61,11 +61,11 @@ MLFLOW_PROBE_TIMEOUT = float(os.getenv("MLFLOW_PROBE_TIMEOUT", "1.5"))  # second
 BASELINE_VERSION = "reference-baseline"
 
 # --- deploy monitoring -----------------------------------------------------
-# The CD hook (ci/deploy_hook.sh) appends one JSON line per deploy attempt to these
-# files. The API reads them on demand (never writes) to power /deploy-status and the
-# delivery_deploy_* metrics. This lets us surface CI/CD history through the same service
-# without standing up a separate dashboard/database. The hook and the API run as the
-# same VM user, so the ``~`` home-directory default resolves to the same files.
+# A CD-record helper (ci/record_run.py) appends one JSON line per deploy attempt to
+# these files. The API reads them on demand (never writes) to power /deploy-status and
+# the delivery_deploy_* metrics. This lets us surface CI/CD history through the same
+# service without standing up a separate dashboard/database. The recorder and the API
+# share a home directory, so the ``~`` default resolves to the same files.
 DEPLOY_RUNS_PATH = os.getenv("DEPLOY_RUNS_PATH", os.path.expanduser("~/deploy-runs.jsonl"))       # one line per deploy
 DEPLOY_RETRAIN_PATH = os.getenv("DEPLOY_RETRAIN_PATH", os.path.expanduser("~/deploy-retrain.jsonl"))  # async retrain outcomes
 DEPLOY_HISTORY_LIMIT = int(os.getenv("DEPLOY_HISTORY_LIMIT", "20"))  # how many recent runs /deploy-status returns

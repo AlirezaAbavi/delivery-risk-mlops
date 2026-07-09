@@ -1,4 +1,4 @@
-# API service image (Delivery deliverable). The trained model is pulled from MLflow
+# Delivery-risk API service image. The trained model is pulled from MLflow
 # at runtime via MLFLOW_TRACKING_URI; if the registry has no Staging model the
 # service falls back to a mounted joblib model (MODEL_PATH) and finally to a bounded
 # arithmetic baseline (see app/model_loader.py). It never hard-fails on startup and
@@ -20,7 +20,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Only the API package is needed at runtime (see .dockerignore).
 COPY app ./app
 
-# Run as an unprivileged user (isolation / security hygiene — graded).
+# Run as an unprivileged user (isolation / security hygiene).
 RUN useradd --create-home --uid 10001 appuser
 USER appuser
 

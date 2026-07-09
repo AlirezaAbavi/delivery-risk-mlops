@@ -8,7 +8,7 @@ layout are configured in exactly one place.
 Two configuration ideas are worth understanding:
   - Connection string: prefer a full ``DATABASE_URL`` if given, else assemble one from
     discrete ``POSTGRES_*`` parts. Both styles of ``.env`` therefore "just work".
-  - Medallion schemas: the server DB is organised into layers (raw -> staging ->
+  - Medallion schemas: the DB can be organised into layers (raw -> staging ->
     features -> predictions -> monitoring). Each layer's schema name is env-driven and
     defaults to ``public``, so a simple single-schema local DB needs no extra config.
 """
@@ -26,9 +26,9 @@ load_dotenv()
 # --- schema layout (medallion) --------------------------------------------
 # "Medallion architecture" = data flows through named quality layers. We keep each
 # layer in its own Postgres schema so responsibilities (and access) are separated.
-# Every name falls back to ``PG_SCHEMA_DEFAULT`` (``public``): on a laptop with one
-# schema everything collapses to ``public`` and the code is unchanged; on the server
-# the env sets RAW_SCHEMA=raw, FEATURES_SCHEMA=features, and so on.
+# Every name falls back to ``PG_SCHEMA_DEFAULT`` (``public``): with one schema
+# everything collapses to ``public`` and the code is unchanged; set RAW_SCHEMA=raw,
+# FEATURES_SCHEMA=features, and so on to split the layers into separate schemas.
 _DEFAULT_SCHEMA = os.getenv("PG_SCHEMA_DEFAULT", "public")
 RAW_SCHEMA = os.getenv("RAW_SCHEMA", _DEFAULT_SCHEMA)                 # untouched source tables
 STAGING_SCHEMA = os.getenv("STAGING_SCHEMA", _DEFAULT_SCHEMA)         # cleaned/intermediate
@@ -51,7 +51,7 @@ def database_url() -> str:
     password = os.getenv("POSTGRES_PASSWORD", "")
     host = os.getenv("POSTGRES_HOST", "127.0.0.1")
     port = os.getenv("POSTGRES_PORT", "5432")
-    db = os.getenv("POSTGRES_DB", "delivery")
+    db = os.getenv("POSTGRES_DB", "delivery_risk")
     return f"postgresql+psycopg2://{user}:{password}@{host}:{port}/{db}"
 
 

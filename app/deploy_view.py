@@ -192,7 +192,7 @@ def render_deploy_html(snapshot: dict) -> str:
 
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
-<title>delivery — deploy status</title>
+<title>delivery-risk — deploy status</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
  body {{ font-family: system-ui, sans-serif; margin: 2rem; color: #222; }}

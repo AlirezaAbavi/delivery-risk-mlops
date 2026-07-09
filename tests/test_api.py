@@ -1,7 +1,7 @@
 """Contract + observability tests for the delivery-risk FastAPI service.
 
-These are the tests the CD hook gates on (a red run blocks every deploy), so they encode
-the *graded* guarantees: the endpoint set and response shape, the temporal-leakage
+These are the tests CI gates on (a red run blocks every deploy), so they encode the
+service's core guarantees: the endpoint set and response shape, the temporal-leakage
 firewall, the metrics roll-up, and the deploy-status reporting. They run entirely
 in-process via FastAPI's TestClient — no real server, DB, or MLflow needed — which is why
 they're fast and safe to run on every commit.
@@ -40,7 +40,7 @@ VALID_PAYLOAD = {
 
 
 def test_health_and_contract():
-    """The core graded contract: required endpoints exist and /predict returns the exact
+    """The core service contract: required endpoints exist and /predict returns the exact
     agreed keys with valid values.
 
     Using `with TestClient(app)` (as a context manager) is important — it triggers the
@@ -72,13 +72,13 @@ def test_health_and_contract():
         assert 'model_source' in health
 
         # /model-info must advertise the temporal-leakage policy verbatim — this string is
-        # part of the graded contract, evidence the firewall is a stated guarantee.
+        # part of the API contract, evidence the firewall is a stated guarantee.
         info = client.get('/model-info').json()
         assert info['temporal_leakage_policy'] == 'purchase-time features only'
 
 
 def test_leakage_firewall_rejects_outcome_fields():
-    """Temporal-leakage firewall (graded): outcome fields must be *rejected*, not ignored.
+    """Temporal-leakage firewall: outcome fields must be *rejected*, not ignored.
 
     The schema is configured to forbid extra fields, so submitting a known
     delivery-outcome/review field raises a ValidationError. We test at the schema level

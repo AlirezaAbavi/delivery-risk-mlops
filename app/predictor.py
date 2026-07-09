@@ -28,7 +28,7 @@ def _reject_forbidden(features: dict) -> None:
 
     Even though Pydantic already rejects unknown fields, we intersect the incoming
     keys with the known outcome/review denylist and raise a *clear* 400 naming the
-    offending fields. This makes the leakage guarantee auditable: a graded reviewer
+    offending fields. This makes the leakage guarantee auditable: anyone
     can send ``is_late_delivery`` and see it explicitly refused, not just dropped.
     """
     leaked = sorted(set(features) & set(config.FORBIDDEN_FIELDS))

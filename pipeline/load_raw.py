@@ -63,8 +63,8 @@ RAW_TABLES: tuple[RawTable, ...] = (
 
 
 def _data_dir() -> Path:
-    """Where the source CSVs live. Env-overridable so the same code finds the data on
-    a laptop and on the server (which may mount it elsewhere)."""
+    """Where the source CSVs live. Env-overridable so the same code finds the data
+    whether it's the committed sample_data/ or a full dataset mounted elsewhere."""
     return Path(os.getenv("RAW_DATA_DIR", "olist_data/olist_data"))
 
 

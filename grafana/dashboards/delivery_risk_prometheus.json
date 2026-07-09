@@ -1,8 +1,8 @@
 {
-  "uid": "delivery-delivery-risk-prom",
-  "title": "Delivery — Delivery-Risk Service (Prometheus)",
-  "description": "Service health + model output for the delivery delivery-risk API, read from the shared Capstone Prometheus. Every query is pinned to $instance so it never blends other groups' identically-named delivery_* metrics. Import into the delivery folder of the shared Grafana (localhost:3010).",
-  "tags": ["delivery", "delivery-risk", "mlops", "prometheus"],
+  "uid": "delivery-risk",
+  "title": "Delivery-Risk Service (Prometheus)",
+  "description": "Service health + model output for the delivery-risk API, read from the local Prometheus. Every query is pinned to $instance. Auto-provisioned into Grafana on docker compose up.",
+  "tags": ["delivery-risk", "mlops", "prometheus"],
   "timezone": "browser",
   "schemaVersion": 39,
   "version": 4,
@@ -15,10 +15,10 @@
         "name": "instance",
         "label": "API instance",
         "type": "query",
-        "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
-        "definition": "label_values(up{job=\"capstone_group_apis\"}, instance)",
-        "query": { "query": "label_values(up{job=\"capstone_group_apis\"}, instance)", "refId": "instance" },
-        "current": { "text": "host.docker.internal:8112", "value": "host.docker.internal:8112" },
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "definition": "label_values(up{job=\"delivery_risk_api\"}, instance)",
+        "query": { "query": "label_values(up{job=\"delivery_risk_api\"}, instance)", "refId": "instance" },
+        "current": { "text": "api:8112", "value": "api:8112" },
         "refresh": 1,
         "includeAll": false,
         "multi": false,
@@ -33,10 +33,10 @@
       "type": "stat",
       "title": "API up",
       "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
-        { "refId": "A", "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
-          "expr": "up{job=\"capstone_group_apis\", instance=\"$instance\"}", "instant": true, "legendFormat": "up" }
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "up{job=\"delivery_risk_api\", instance=\"$instance\"}", "instant": true, "legendFormat": "up" }
       ],
       "fieldConfig": {
         "defaults": {
@@ -54,9 +54,9 @@
       "type": "stat",
       "title": "Model loaded (1=real model, 0=baseline)",
       "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
-        { "refId": "A", "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" },
           "expr": "delivery_model_loaded{instance=\"$instance\"}", "instant": true, "legendFormat": "model_loaded" }
       ],
       "fieldConfig": {
@@ -75,9 +75,9 @@
       "type": "stat",
       "title": "Total predictions",
       "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
-        { "refId": "A", "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" },
           "expr": "sum(delivery_predictions_total{instance=\"$instance\"})", "instant": true, "legendFormat": "predictions" }
       ],
       "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "fixed", "fixedColor": "blue" } }, "overrides": [] },
@@ -88,9 +88,9 @@
       "type": "stat",
       "title": "Scoring errors (degraded to baseline)",
       "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
-        { "refId": "A", "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" },
           "expr": "sum(delivery_prediction_errors_total{instance=\"$instance\"})", "instant": true, "legendFormat": "errors" }
       ],
       "fieldConfig": {
@@ -105,9 +105,9 @@
       "type": "timeseries",
       "title": "Request rate by endpoint (req/s)",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
-      "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
-        { "refId": "A", "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" },
           "expr": "sum by (endpoint) (rate(delivery_http_requests_total{instance=\"$instance\"}[5m]))", "legendFormat": "{{endpoint}}" }
       ],
       "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "drawStyle": "line", "fillOpacity": 10, "showPoints": "never" } }, "overrides": [] },
@@ -118,9 +118,9 @@
       "type": "timeseries",
       "title": "Error rate (HTTP >= 400, err/s)",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
-      "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
-        { "refId": "A", "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" },
           "expr": "sum by (status) (rate(delivery_http_errors_total{instance=\"$instance\"}[5m]))", "legendFormat": "HTTP {{status}}" }
       ],
       "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "drawStyle": "line", "fillOpacity": 10, "showPoints": "never" }, "color": { "mode": "fixed", "fixedColor": "red" } }, "overrides": [] },
@@ -131,13 +131,13 @@
       "type": "timeseries",
       "title": "Prediction latency (p50 / p95 / p99, seconds)",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
-      "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
-        { "refId": "A", "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" },
           "expr": "histogram_quantile(0.50, sum by (le) (rate(delivery_prediction_latency_seconds_bucket{instance=\"$instance\"}[5m])))", "legendFormat": "p50" },
-        { "refId": "B", "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+        { "refId": "B", "datasource": { "type": "prometheus", "uid": "prometheus" },
           "expr": "histogram_quantile(0.95, sum by (le) (rate(delivery_prediction_latency_seconds_bucket{instance=\"$instance\"}[5m])))", "legendFormat": "p95" },
-        { "refId": "C", "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+        { "refId": "C", "datasource": { "type": "prometheus", "uid": "prometheus" },
           "expr": "histogram_quantile(0.99, sum by (le) (rate(delivery_prediction_latency_seconds_bucket{instance=\"$instance\"}[5m])))", "legendFormat": "p99" }
       ],
       "fieldConfig": { "defaults": { "unit": "s", "custom": { "drawStyle": "line", "fillOpacity": 5, "showPoints": "never" } }, "overrides": [] },
@@ -148,9 +148,9 @@
       "type": "piechart",
       "title": "Risk-level distribution (model output)",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
-      "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
-        { "refId": "A", "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" },
           "expr": "sum by (risk_level) (delivery_predictions_total{instance=\"$instance\"})", "instant": true, "legendFormat": "{{risk_level}}" }
       ],
       "fieldConfig": {
@@ -169,9 +169,9 @@
       "type": "timeseries",
       "title": "Predictions by risk level over time (pred/s)",
       "gridPos": { "h": 8, "w": 24, "x": 0, "y": 20 },
-      "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
-        { "refId": "A", "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" },
           "expr": "sum by (risk_level) (rate(delivery_predictions_total{instance=\"$instance\"}[5m]))", "legendFormat": "{{risk_level}}" }
       ],
       "fieldConfig": {
@@ -198,9 +198,9 @@
       "title": "Last deploy status",
       "description": "1 if the most recent CD-hook deploy succeeded (tests passed + actions ok), 0 otherwise. Sourced from the API's delivery_deploy_last_status gauge, which reads ~/deploy-runs.jsonl.",
       "gridPos": { "h": 4, "w": 6, "x": 0, "y": 29 },
-      "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
-        { "refId": "A", "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" },
           "expr": "delivery_deploy_last_status{instance=\"$instance\"}", "instant": true, "legendFormat": "status" }
       ],
       "fieldConfig": {
@@ -220,9 +220,9 @@
       "title": "Time since last deploy",
       "description": "Age of the most recent recorded deploy.",
       "gridPos": { "h": 4, "w": 6, "x": 6, "y": 29 },
-      "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
-        { "refId": "A", "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" },
           "expr": "time() - delivery_deploy_last_timestamp_seconds{instance=\"$instance\"}", "instant": true, "legendFormat": "age" }
       ],
       "fieldConfig": { "defaults": { "unit": "s", "color": { "mode": "fixed", "fixedColor": "blue" } }, "overrides": [] },
@@ -234,9 +234,9 @@
       "title": "Last deploy duration",
       "description": "Wall-clock time the last deploy (fetch → test gate → restart/trigger/import) took.",
       "gridPos": { "h": 4, "w": 6, "x": 12, "y": 29 },
-      "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
-        { "refId": "A", "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" },
           "expr": "delivery_deploy_last_duration_seconds{instance=\"$instance\"}", "instant": true, "legendFormat": "duration" }
       ],
       "fieldConfig": { "defaults": { "unit": "s", "color": { "mode": "fixed", "fixedColor": "purple" } }, "overrides": [] },
@@ -248,9 +248,9 @@
       "title": "Deploys recorded",
       "description": "Number of deploy attempts in the current run-log window (last ~20).",
       "gridPos": { "h": 4, "w": 6, "x": 18, "y": 29 },
-      "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
-        { "refId": "A", "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" },
           "expr": "delivery_deploy_runs_total{instance=\"$instance\"}", "instant": true, "legendFormat": "runs" }
       ],
       "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "fixed", "fixedColor": "blue" } }, "overrides": [] },
@@ -262,9 +262,9 @@
       "title": "Retrain succeeded",
       "description": "1 if the last deploy's Airflow retrain finished successfully, 0 otherwise (failed / still running / no retrain queued). See the 'Last retrain state' table for the exact state. Sourced from delivery_deploy_last_retrain_status, reconciled async by ci/watch_dag.py.",
       "gridPos": { "h": 5, "w": 6, "x": 0, "y": 33 },
-      "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
-        { "refId": "A", "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" },
           "expr": "delivery_deploy_last_retrain_status{instance=\"$instance\"}", "instant": true, "legendFormat": "retrain" }
       ],
       "fieldConfig": {
@@ -284,9 +284,9 @@
       "title": "Last deploy commit",
       "description": "Commit SHA and status of the last deploy, carried as labels on delivery_deploy_last_commit_info. Full history + changed paths are at the API's /deploy-status endpoint.",
       "gridPos": { "h": 5, "w": 9, "x": 6, "y": 33 },
-      "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
-        { "refId": "A", "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" },
           "expr": "delivery_deploy_last_commit_info{instance=\"$instance\"}", "instant": true, "format": "table" }
       ],
       "transformations": [
@@ -301,9 +301,9 @@
       "title": "Last retrain state",
       "description": "State (running / success / failed / timeout / none) and Airflow run id of the retrain the last deploy queued, carried as labels on delivery_deploy_last_retrain_info. Reconciled asynchronously so it lags the deploy while the DAG runs.",
       "gridPos": { "h": 5, "w": 9, "x": 15, "y": 33 },
-      "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
-        { "refId": "A", "datasource": { "type": "prometheus", "uid": "capstone-prometheus" },
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" },
           "expr": "delivery_deploy_last_retrain_info{instance=\"$instance\"}", "instant": true, "format": "table" }
       ],
       "transformations": [

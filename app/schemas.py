@@ -34,7 +34,7 @@ class PredictionInput(BaseModel):
     # ``model_config`` configures the whole model. Two important choices here:
     #   - extra="forbid": unknown keys raise a validation error (the leakage firewall).
     #   - json_schema_extra.example: a complete, valid payload that shows up in the
-    #     Swagger "Try it out" box, so an evaluator can fire a real request in one click.
+    #     Swagger "Try it out" box, so you can fire a real request in one click.
     model_config = ConfigDict(
         extra="forbid",
         json_schema_extra={
@@ -141,7 +141,7 @@ class PredictionInput(BaseModel):
 
 
 class PredictionResponse(BaseModel):
-    """Exactly the six keys the graded API contract requires per prediction.
+    """Exactly the six keys the API contract returns per prediction.
 
     Keeping the response model explicit (rather than returning a free-form dict)
     means the contract is enforced by the framework: if we ever return the wrong
@@ -168,7 +168,7 @@ class HealthResponse(BaseModel):
 class ModelInfoResponse(BaseModel):
     """Describes the actually-loaded model for /model-info.
 
-    Everything here is read from the live model state, not hardcoded, so an evaluator
+    Everything here is read from the live model state, not hardcoded, so a caller
     can confirm *which* registry version is serving right now.
     """
 

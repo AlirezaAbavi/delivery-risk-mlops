@@ -1,4 +1,4 @@
-"""FastAPI application entry point — the Delivery graded deliverable.
+"""FastAPI application entry point for the delivery-risk service.
 
 This module wires the whole service together but keeps almost no logic of its own:
 it defines the six contract endpoints (+ /deploy-status) and delegates to the

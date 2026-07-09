@@ -62,7 +62,7 @@ def run() -> None:
     payload = dict(PredictionInput.model_config["json_schema_extra"]["example"])
     status, pred = _post("/predict", payload)
     assert status == 200, f"/predict returned HTTP {status}"
-    # Assert the response carries every field the graded contract requires...
+    # Assert the response carries every field the API contract requires...
     missing = REQUIRED_KEYS - set(pred)
     assert not missing, f"/predict missing keys: {sorted(missing)}"
     # ...and that the probability is actually a valid probability, not a raw score or NaN.

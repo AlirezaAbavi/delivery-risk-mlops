@@ -1,6 +1,6 @@
 """Build the leak-free purchase-time feature table (featureset_v1).
 
-Temporal-leakage firewall (graded): every feature is knowable at/around
+Temporal-leakage firewall: every feature is knowable at/around
 ``order_purchase_timestamp``. The estimated-delivery date and per-item
 ``shipping_limit_date`` are commitments *set at purchase*, so windows derived from
 them are legal. The label uses the actual delivered date, but that is the target
