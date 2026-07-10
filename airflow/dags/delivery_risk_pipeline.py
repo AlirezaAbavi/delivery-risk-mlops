@@ -1,49 +1,34 @@
-"""MLOps Delivery — delivery-risk MLOps pipeline (course Airflow).
+"""Delivery-risk MLOps pipeline (local Airflow in the compose stack).
 
-Deployed by git-sync: the course Airflow pulls this repo's ``airflow/dags/*.py``
-into ``/opt/airflow/dags/delivery-capstone/delivery/``. Because the Airflow worker has
-neither our code, the Olist CSVs, nor our MLflow, every real step executes ON the
-group VM through the course SSH bridge (``delivery_group_ssh.sh``); the worker only
-orchestrates and branches. This mirrors the proven benchmark-team pattern.
+Every step runs a pipeline module directly in the Airflow worker as
+``python -m pipeline.X``. The worker has the repo mounted at ``/opt/project``
+(``PYTHONPATH=/opt/project``) and reads its DB / MLflow / data settings from the
+environment supplied by ``docker-compose.yaml`` — the same config the CLI and API use.
 
-Isolation/security (graded): NO credentials in this file. Steps read the VM's
-``~/project/.env`` (DB, schema layout, MLflow) via ``load_dotenv`` — the same
-config the CLI and API use. The VM ``.env`` must set the medallion schemas:
-    RAW_SCHEMA=raw  STAGING_SCHEMA=staging  FEATURES_SCHEMA=features
-    PREDICTIONS_SCHEMA=predictions  MONITORING_SCHEMA=monitoring
-    RAW_DATA_DIR=/home/delivery/olist_data
-
-Chain (covers the brief's required tasks + the full ops cycle):
+Chain (the full ops cycle):
     load_raw_data -> build_features -> train_model -> register_model
       -> api_smoke_test -> batch_predict -> monitor
       -> decide_retrain -> [flag_retrain | no_retrain]
 """
 from __future__ import annotations
 
-import shlex
+import os
 from datetime import datetime, timedelta
 
 from airflow import DAG
 from airflow.operators.bash import BashOperator
 from airflow.operators.python import BranchPythonOperator
 
-# --- server deployment settings (no secrets) ------------------------------
-GROUP = "delivery"
-PROJECT_DIR = f"/home/{GROUP}/project"
-PYTHON = f"{PROJECT_DIR}/.venv/bin/python"
-# SSH bridge mounted in the Airflow container; forwards a command to the VM host.
-BRIDGE = "/opt/airflow/plugins/delivery_group_ssh.sh"
-
-
-def bridge(command: str) -> str:
-    """Wrap a shell command so it runs on the group VM via the SSH bridge."""
-    inner = f"cd {PROJECT_DIR} && {command}"
-    return f"{BRIDGE} {shlex.quote(GROUP)} {shlex.quote(inner)}"
+# The repo is mounted here in the Airflow containers (see docker-compose.yaml).
+PROJECT_DIR = "/opt/project"
+# The pipeline runs in its own virtualenv (isolated from Airflow's own dependency
+# pins — notably SQLAlchemy). docker-compose.yaml points PIPELINE_PYTHON at it.
+PIPELINE_PYTHON = os.getenv("PIPELINE_PYTHON", "python")
 
 
 def step(module: str) -> str:
-    """Bridge command that runs a pipeline module on the VM's project venv."""
-    return bridge(f"{PYTHON} -m {module}")
+    """Bash command that runs a pipeline module in the project directory."""
+    return f"{PIPELINE_PYTHON} -m {module}"
 
 
 def _decide_retrain(**context) -> str:
@@ -57,65 +42,71 @@ def _decide_retrain(**context) -> str:
 
 
 # Defaults applied to every task unless overridden. retries=0 keeps a failing step
-# failing fast and visibly (rather than masking a real problem behind auto-retries)
-# during a graded demo; retry_delay is set anyway so it's easy to flip retries on.
+# failing fast and visibly rather than masking a real problem behind auto-retries;
+# retry_delay is set anyway so it's easy to flip retries on.
 default_args = {
-    "owner": GROUP,
+    "owner": "delivery-risk",
     "depends_on_past": False,
     "retries": 0,
     "retry_delay": timedelta(minutes=2),
 }
 
 # schedule=None + catchup=False => this DAG only runs when triggered manually (from the
-# UI or CLI). It's an on-demand operational pipeline for the demo, not a cron job, so we
-# don't want Airflow backfilling missed runs from start_date to now.
+# UI or CLI). It's an on-demand operational pipeline, not a cron job, so we don't want
+# Airflow backfilling missed runs from start_date to now.
 with DAG(
-    dag_id="delivery_capstone_workflow",
-    description="Delivery Olist late-delivery MLOps pipeline (SSH bridge to VM).",
+    dag_id="delivery_risk_pipeline",
+    description="Olist late-delivery MLOps pipeline: load -> features -> train -> register -> predict -> monitor.",
     default_args=default_args,
-    start_date=datetime(2026, 1, 1),
+    start_date=datetime(2024, 1, 1),
     schedule=None,
     catchup=False,
-    tags=["delivery", "delivery", "mlops", "delivery-risk"],
+    tags=["delivery-risk", "mlops"],
 ) as dag:
 
-    # Each step is a BashOperator whose command is a `step("pipeline.X")` string — i.e.
-    # "run `python -m pipeline.X` on the group VM via the SSH bridge". The worker itself
-    # does no data work; it just fires these remote commands and reacts to their exit code.
+    # Each step runs `python -m pipeline.X` in the mounted project directory. The worker
+    # does the data work in-process; there is no remote bridge.
     load_raw_data = BashOperator(
         task_id="load_raw_data",
         bash_command=step("pipeline.load_raw"),
+        cwd=PROJECT_DIR,
     )
 
     build_features = BashOperator(
         task_id="build_features",
         bash_command=step("pipeline.features"),
+        cwd=PROJECT_DIR,
     )
 
     train_model = BashOperator(
         task_id="train_model",
         bash_command=step("pipeline.train"),
+        cwd=PROJECT_DIR,
     )
 
     register_model = BashOperator(
         task_id="register_model",
         bash_command=step("pipeline.register"),
+        cwd=PROJECT_DIR,
     )
 
     api_smoke_test = BashOperator(
         task_id="api_smoke_test",
         bash_command=step("pipeline.smoke_test"),
+        cwd=PROJECT_DIR,
     )
 
     batch_predict = BashOperator(
         task_id="batch_predict",
         bash_command=step("pipeline.batch_predict"),
+        cwd=PROJECT_DIR,
     )
 
     # monitor prints the retrain flag as its last stdout line -> captured as XCom.
     monitor = BashOperator(
         task_id="monitor",
         bash_command=step("pipeline.monitor"),
+        cwd=PROJECT_DIR,
         do_xcom_push=True,
     )
 

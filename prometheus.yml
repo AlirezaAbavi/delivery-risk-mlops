@@ -1,0 +1,13 @@
+# Prometheus scrape config for the delivery-risk stack.
+# The API exposes /metrics with delivery_* series; we scrape it by its compose
+# service name. The job label `delivery_risk_api` is what the Grafana dashboard's
+# $instance variable filters on.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: delivery_risk_api
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["api:8112"]

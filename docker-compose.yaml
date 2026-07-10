@@ -1,0 +1,138 @@
+# Full delivery-risk MLOps stack. Bring it all up with `docker compose up -d`,
+# then run `make bootstrap` to load data, train, register, and score.
+#
+#   postgres    data warehouse for the pipeline (raw -> features -> predictions -> monitoring)
+#   mlflow      experiment tracking + model registry (:5312)
+#   api         FastAPI delivery-risk service (:8112)
+#   airflow     orchestrates the pipeline DAG (:8080, standalone)
+#   prometheus  scrapes the API metrics (:9090)
+#   grafana     dashboards over Prometheus (:3000)
+
+name: delivery-risk-mlops
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-delivery}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-delivery}
+      POSTGRES_DB: ${POSTGRES_DB:-delivery_risk}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-delivery} -d ${POSTGRES_DB:-delivery_risk}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.17.2
+    # SQLite backend keeps the image dependency-free (no psycopg2 needed in mlflow);
+    # artifacts are served back through the tracking server so the API and the pipeline
+    # both resolve `models:/delivery-risk/Staging` over http with no shared volume.
+    command: >
+      mlflow server
+      --backend-store-uri sqlite:////mlflow/mlflow.db
+      --artifacts-destination /mlflow/artifacts
+      --host 0.0.0.0
+      --port 5312
+    ports:
+      - "5312:5312"
+    volumes:
+      - mlflow-data:/mlflow
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:5312/health').status==200 else 1)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build: .
+    image: delivery-risk-api
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:5312
+      MODEL_NAME: delivery-risk
+      MODEL_STAGE: Staging
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER:-delivery}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-delivery}
+      POSTGRES_DB: ${POSTGRES_DB:-delivery_risk}
+    ports:
+      - "8112:8112"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mlflow:
+        condition: service_started
+
+  airflow:
+    build:
+      context: .
+      dockerfile: airflow/Dockerfile
+    command: standalone
+    environment:
+      # Airflow keeps its own metadata in a container-local SQLite DB (SequentialExecutor);
+      # the pipeline's *data* lives in the separate `postgres` service below.
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_FOLDER: /opt/project/airflow/dags
+      _AIRFLOW_WWW_USER_USERNAME: ${AIRFLOW_USER:-admin}
+      _AIRFLOW_WWW_USER_PASSWORD: ${AIRFLOW_PASSWORD:-admin}
+      # The pipeline runs in its own venv (see airflow/Dockerfile) with PYTHONPATH at the
+      # mounted repo, so `import app` / `import pipeline` resolve.
+      PIPELINE_PYTHON: /home/airflow/pipeline-venv/bin/python
+      PYTHONPATH: /opt/project
+      # Pipeline runtime config (read by pipeline/db.py, app/config.py, pipeline/smoke_test.py).
+      MLFLOW_TRACKING_URI: http://mlflow:5312
+      MLFLOW_EXPERIMENT_NAME: delivery-risk
+      MODEL_NAME: delivery-risk
+      MODEL_STAGE: Staging
+      API_BASE_URL: http://api:8112
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER:-delivery}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-delivery}
+      POSTGRES_DB: ${POSTGRES_DB:-delivery_risk}
+      RAW_DATA_DIR: /opt/project/sample_data
+    ports:
+      - "8080:8080"
+    volumes:
+      - .:/opt/project
+      - airflow-data:/opt/airflow
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mlflow:
+        condition: service_started
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    depends_on:
+      - api
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_SECURITY_ALLOW_EMBEDDING: "true"
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+
+volumes:
+  postgres-data:
+  mlflow-data:
+  airflow-data:
