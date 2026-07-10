@@ -1,14 +1,9 @@
-# MLOps project — Delivery
-# Delivery-Risk Operations: Full Project Documentation
+# Delivery-Risk MLOps: Full Project Documentation
 
-**Team:** Delivery · **Track:** delivery-risk operations · **Cohort:** MLOps MLOps Bootcamp (Spring 1405 / 2026)
-**Author of this deliverable:** Alireza Abavi · **Date:** 2026-07-08
-
-> This document is the end-to-end write-up of the Delivery capstone. It walks through the
+> This document is the end-to-end write-up of the delivery-risk platform. It walks through the
 > problem, the data, feature engineering, model training and selection, the FastAPI serving
-> layer, Airflow orchestration, MLflow tracking, Prometheus/Grafana observability, the CI/CD
-> deployment hook, security/isolation, and repository hygiene. Screenshot placeholders
-> (`![...]`) mark where to drop demo captures for the presentation.
+> layer, Airflow orchestration, MLflow tracking, Prometheus/Grafana observability, CI/CD,
+> security/isolation, and repository hygiene.
 
 ---
 
@@ -29,12 +24,12 @@
 13. [Observability: Prometheus metrics](#13-observability-prometheus-metrics)
 14. [Observability: Grafana dashboard](#14-observability-grafana-dashboard)
 15. [Observability: structured logging](#15-observability-structured-logging)
-16. [CI/CD: the VM-side deployment hook](#16-cicd-the-vm-side-deployment-hook)
+16. [CI/CD](#16-cicd)
 17. [Docker & deployment](#17-docker--deployment)
 18. [Security & isolation](#18-security--isolation)
-19. [Repository organization & version-control hygiene](#19-repository-organization--version-control-hygiene)
+19. [Repository organization](#19-repository-organization)
 20. [Known limitations & future work](#20-known-limitations--future-work)
-21. [Appendix A — Demo & screenshot checklist](#appendix-a--demo--screenshot-checklist)
+21. [Appendix A — Demo walkthrough](#appendix-a--demo-walkthrough)
 22. [Appendix B — Command reference](#appendix-b--command-reference)
 
 ---
@@ -60,13 +55,15 @@ intervene early (expedite fulfilment, confirm carrier capacity, proactively noti
 - **monitors** drift (PSI) and performance decay, and emits an explicit **retrain decision**;
 - **observes** everything through **Prometheus** metrics and a **Grafana** dashboard, plus
   structured JSON logs;
-- **deploys continuously** via a VM-side deployment hook (a pragmatic substitute for
-  GitLab-native CI/CD, which the account role could not use).
+- **runs CI** in GitHub Actions (tests + image build + compose validation) and surfaces
+  deploy history through the API's `/deploy-status` endpoint.
 
-**Headline result.** The winning model is a **HistGradientBoostingClassifier** with a validation
-**ROC-AUC ≈ 0.72 / PR-AUC ≈ 0.15** on an 8.1%-positive problem. The single dominant predictor is
-the **shipping window** (the gap between the seller's shipping deadline and the promised delivery
-date) — see §5.
+**Headline result (full Olist dataset).** On the real ~100k-order data the problem is heavily
+imbalanced (~8% late), so models are compared by PR-AUC; the winner reaches a validation
+**ROC-AUC ≈ 0.72**. The single dominant predictor is the **shipping window** (the gap between the
+seller's shipping deadline and the promised delivery date) — see §5. The committed synthetic
+`sample_data/` is intentionally smaller and easier, so the zero-config demo trains a real model
+quickly; the emphasis of this project is the pipeline and operations, not model accuracy.
 
 ---
 
@@ -74,11 +71,11 @@ date) — see §5.
 
 ```
                  ┌──────────────────────────────────────────────────────────────┐
-                 │                     Airflow (course, SSH-bridge)               │
+                 │              Airflow — delivery_risk_pipeline DAG              │
                  │  load_raw → build_features → train → register → smoke_test →   │
                  │  batch_predict → monitor → decide_retrain →[flag | no_retrain] │
                  └───────────────┬──────────────────────────────────────────────┘
-                                 │ runs each step on the group VM
+                                 │ runs each step as `python -m pipeline.X`
                                  ▼
  Olist CSVs ──► Postgres (medallion)                     MLflow (:5312)
    raw schema      raw.* ─┐                              experiments + registry
@@ -95,43 +92,39 @@ date) — see §5.
                           /predict /health /metrics ...
                                  │  exposes Prometheus metrics
                                  ▼
-                          Prometheus (:9091, course) ──► Grafana (:3010, delivery org)
+                          Prometheus (:9090) ──► Grafana (:3000)
 ```
 
-> 📸 **Screenshot placeholder:** a clean architecture diagram (redraw the box diagram above in
-> draw.io / Excalidraw) — `docs/images/architecture.png`.
+All of the above run as services in a single `docker-compose.yaml`.
 
 ---
 
 ## 3. Infrastructure & environments
 
-The project runs in **two mirrored environments** so we can develop safely and demo reliably.
+The whole platform runs as one Docker Compose stack on `localhost` — `docker compose up -d`
+starts every service; `make bootstrap` runs the pipeline once to populate MLflow, Postgres, and
+the dashboards.
 
-| Concern | Local dev (laptop) | Course server (`localhost`, user `delivery`) |
-|---|---|---|
-| Postgres | `127.0.0.1:5432`, DB `delivery`, single `public` schema | `…:32112`, DB `delivery_mlops_delivery`, **6-schema medallion** |
-| MLflow | local server `127.0.0.1:5312` (sqlite + file artifacts) | local server `127.0.0.1:5312` (per-group) |
-| Airflow | Dockerized `apache/airflow:3.2.2`, UI `127.0.0.1:8080` | course Airflow `…:33013` (SSH-bridges to the VM) |
-| API | uvicorn `…:8112` | **systemd service** `delivery-capstone-api.service` on `…:8112` |
-| Prometheus | — | course-managed `…:9091` (already scrapes our `:8112`) |
-| Grafana | — | shared `…:3010`, delivery org (role: Editor) |
-| GitLab | `origin` | `…:8181` (project id 2; role: Developer) |
+| Service | Image | Port | Role |
+|---|---|---|---|
+| `postgres` | `postgres:16` | 5432 | data warehouse (raw → features → predictions → monitoring) |
+| `mlflow` | `ghcr.io/mlflow/mlflow` | 5312 | experiment tracking + model registry (sqlite backend, served artifacts) |
+| `api` | built from `Dockerfile` | 8112 | FastAPI delivery-risk service |
+| `airflow` | built from `airflow/Dockerfile` | 8080 | orchestrates `delivery_risk_pipeline` (standalone) |
+| `prometheus` | `prom/prometheus` | 9090 | scrapes the API's `/metrics` |
+| `grafana` | `grafana/grafana` | 3000 | auto-provisioned dashboard over Prometheus |
 
-**Key infrastructure facts (they shaped design decisions):**
+**Design facts:**
 
-- The course Postgres, MLflow, and API are all **loopback-only on the VM**; the course Airflow
-  worker cannot reach them directly. Hence the DAG uses an **SSH bridge** to run each step *on the
-  VM itself* (§11).
-- The course **Prometheus is managed by the course** — we can't edit scrape targets; we only
-  control what our API exposes. It already scrapes `host.docker.internal:8112`.
-- Multiple groups emit **unprefixed `delivery_*` metric names** into the *same* Prometheus, so every
-  Grafana query is **pinned to `instance="host.docker.internal:8112"`** to avoid blending other
-  groups' series (§14).
+- Services reach each other by **compose service name** (`postgres`, `http://mlflow:5312`,
+  `http://api:8112`) — no host IPs, no SSH bridges.
+- The pipeline pins its own dependency stack (notably SQLAlchemy 2.x, which conflicts with
+  Airflow's 1.4), so `airflow/Dockerfile` installs the project into an **isolated virtualenv**
+  and the DAG runs each step with that interpreter (§11).
+- Every metric is prefixed `delivery_*`, sitting in its own namespace so Prometheus/Grafana queries
+  select it cleanly (§13–14).
 - All configuration is **environment-driven** (`.env`, gitignored; `.env.example` committed) so the
-  *same code and Docker image* run in both environments with zero code changes.
-
-> 📸 **Screenshot placeholder:** `systemctl --user status delivery-capstone-api.service` showing
-> `active (running)` and `Restart=always` — `docs/images/systemd-api.png`.
+  *same code and image* run in the compose stack or directly on a host with zero code changes.
 
 ---
 
@@ -163,12 +156,11 @@ relevant to late-delivery modelling (marketing / closed-deals CSVs are deliberat
   dates) are parsed to real timestamps at load time, so downstream feature SQL does temporal
   arithmetic without re-parsing.
 - **Encoding**: the category-translation CSV carries a UTF-8 BOM; it is read with `utf-8-sig`.
-- **Schema-aware**: writes into the env-configured `RAW_SCHEMA` (server: `raw`; local: `public`).
+- **Schema-aware**: writes into the env-configured `RAW_SCHEMA` (defaults to `public`).
 
-### 4.3 The medallion schema (server)
+### 4.3 The medallion schema
 
-The server database `delivery_mlops_delivery` uses a **6-schema medallion** layout, each layer owned by
-the group role, each written by a distinct pipeline step:
+The pipeline is organised as a **medallion** layout — each layer written by a distinct step:
 
 | Schema | Written by | Contents |
 |---|---|---|
@@ -177,14 +169,11 @@ the group role, each written by a distinct pipeline step:
 | `features` | `features.py` | `features.featureset_v1` (the model input table) |
 | `predictions` | `batch_predict.py` | `predictions.predictions` (scored orders) |
 | `monitoring` | `monitor.py` | `monitoring.monitoring_metrics` (drift history) |
-| `public` | (default) | fallback for single-schema local dev |
+| `public` | (default) | fallback for single-schema setups |
 
 `pipeline/db.py` is the single source of truth for the SQLAlchemy engine and the per-layer schema
-names. Each schema name is an env var defaulting to `public`, so the **same code** runs against the
-single-schema local DB and the multi-schema server DB with no changes.
-
-> 📸 **Screenshot placeholder:** `psql \dn` (schemas) and `\dt raw.*` (row counts) — 
-> `docs/images/db-schemas.png`.
+names. Each schema name is an env var defaulting to `public`, so the **same code** runs against a
+single-schema database (the compose default) or a multi-schema database with no changes.
 
 ---
 
@@ -350,7 +339,7 @@ and **select on PR-AUC**:
 
 ### 7.4 Results
 
-On the temporal validation window (train ≈ 77k, valid ≈ 19k):
+On the temporal validation window of the **full Olist dataset** (train ≈ 77k, valid ≈ 19k):
 
 | Model | PR-AUC | ROC-AUC |
 |---|---:|---:|
@@ -359,24 +348,20 @@ On the temporal validation window (train ≈ 77k, valid ≈ 19k):
 | **HistGradientBoosting (winner)** | **0.154** | **0.720** |
 
 The winner is registered to MLflow and promoted to **Staging**, and the same fitted pipeline is
-dumped to `artifacts/model.joblib` for the API's local fallback.
+dumped to `artifacts/model.joblib` for the API's local fallback. (The committed synthetic
+`sample_data/` is smaller and easier, so the zero-config demo trains a real model in seconds with
+different numbers — the mechanics, not the metrics, are the point.)
 
-**External benchmark (honesty about limitations).** We benchmarked our model head-to-head against
-**benchmark-team's** model on an *identical* test window (delivered orders ≥ 2018-07-01, n=12,507). On that
-harder slice, ours scored ROC-AUC **0.659** vs their **0.747**. Their edge is **entirely feature
-engineering** (same raw data, same algorithm family): they add **customer geography**
-(`customer_state`, `customer_seller_same_state`) and cross-state interaction features, letting them
-model seller↔customer distance — the dominant late-delivery driver. Our raw `customers` table
-already has `customer_state`, so this is a concrete, planned improvement (§20).
-
-> 📸 **Screenshot placeholder:** the MLflow **experiment view** with the three candidate runs and
-> their PR-AUC/ROC-AUC columns side by side — `docs/images/mlflow-compare.png`.
+**Known limitation.** The strongest missing signal is **customer geography**: the raw `customers`
+table has `customer_state`, and modelling seller↔customer distance (e.g. a
+`customer_seller_same_state` interaction) is the most promising accuracy improvement — a concrete,
+planned enhancement (§20). Accuracy is deliberately not the focus here; the platform is.
 
 ---
 
 ## 8. MLflow: experiments, runs & the registry
 
-**Tracking server:** `http://127.0.0.1:5312` (per-group, sqlite backend + file artifacts).
+**Tracking server:** `http://mlflow:5312` in the compose stack (sqlite backend + served artifacts).
 
 ### 8.1 Why there are *many* models in MLflow
 
@@ -409,9 +394,6 @@ The model **signature** is inferred from the validation data (`infer_signature`)
 `pipeline/register.py` is a distinct DAG task (not merged into training): it verifies a registered
 version exists and ensures the newest version sits in the configured stage, **failing loudly** if
 training ever produced no model. This makes `register_model` a meaningful, re-runnable step.
-
-> 📸 **Screenshot placeholder:** MLflow **Models** page showing `delivery-risk` with
-> multiple versions and one in **Staging** — `docs/images/mlflow-registry.png`.
 
 ---
 
@@ -464,42 +446,32 @@ after `train_register` on the same data is redundant, and a monitor→train→mo
 retrain storm. If we ever automate it, the correct pattern is a **scheduled** monitoring DAG that
 triggers a **separate** training DAG, bounded by a schedule + a cooldown guard.
 
-> 📸 **Screenshot placeholder:** `artifacts/monitoring_report.json` (or the `monitoring_metrics`
-> table) showing the PSI values and the `retrain_recommended` verdict —
-> `docs/images/monitoring-report.png`.
-
 ---
 
 ## 11. Airflow orchestration
 
-**File:** `airflow/dags/capstone_pipeline.py` — `dag_id = delivery_capstone_workflow`.
+**File:** `airflow/dags/delivery_risk_pipeline.py` — `dag_id = delivery_risk_pipeline`.
 
-### 11.1 How it deploys
+### 11.1 How it runs
 
-The course Airflow runs every group's DAG from a **git-synced monorepo**: our repo's
-`airflow/dags/*.py` are pulled into `/opt/airflow/dags/delivery-capstone/delivery/`. **Deploying a DAG
-change = push to `main`** — there is no deploy script on the server. (Proven: our tracked
-`capstone_pipeline.py` is byte-identical to the live DAG.)
-
-### 11.2 Why the SSH-bridge pattern
-
-The Airflow worker has **neither our code, the Olist CSVs, nor our MLflow**, and it can't reach the
-VM's loopback services. So each task is a `BashOperator` that forwards its command through the course
-**SSH bridge** (`/opt/airflow/plugins/delivery_group_ssh.sh`) to run *on the group VM*, in the project
-venv, against the VM's `.env`:
+In the compose stack the Airflow container mounts the repo at `/opt/project` and reads its DAGs from
+`airflow/dags/`. Each task is a `BashOperator` that runs a pipeline module directly:
 
 ```python
-def bridge(command):        # run on the group VM via SSH bridge
-    inner = f"cd {PROJECT_DIR} && {command}"
-    return f"{BRIDGE} {shlex.quote(GROUP)} {shlex.quote(inner)}"
-
-def step(module):           # run a pipeline module on the VM's venv
-    return bridge(f"{PYTHON} -m {module}")
+def step(module):           # run a pipeline module in the isolated venv
+    return f"{PIPELINE_PYTHON} -m {module}"
 ```
 
-**No credentials live in the DAG** (graded isolation) — every step reads the VM's `~/project/.env`.
+`PIPELINE_PYTHON` points at the virtualenv baked by `airflow/Dockerfile`, which installs the
+project's `requirements.txt` **separately from Airflow's own dependencies** (the pipeline pins
+SQLAlchemy 2.x, which conflicts with Airflow's 1.4). `PYTHONPATH=/opt/project` lets `import app` /
+`import pipeline` resolve. No credentials live in the DAG — every step reads its config from the
+environment supplied by compose, exactly like the API.
 
-### 11.3 The task chain
+Because each task runs the same `python -m pipeline.X` entrypoint that `make bootstrap` uses,
+triggering the DAG and running `make bootstrap` are equivalent.
+
+### 11.2 The task chain
 
 ```
 load_raw_data → build_features → train_model → register_model
@@ -512,11 +484,6 @@ load_raw_data → build_features → train_model → register_model
   the schema's own example payload so it can never drift from the contract.
 - `decide_retrain` is a `BranchPythonOperator` that reads the monitor's XCom flag; it defaults to
   `no_retrain` if the flag is missing, so an XCom hiccup never forces an unwanted retrain.
-
-The DAG ran **green end-to-end** on the course Airflow (all 10 tasks, run `api_trigger__1783425803`).
-
-> 📸 **Screenshot placeholder:** the Airflow **Graph view** of a fully green
-> `delivery_capstone_workflow` run — `docs/images/airflow-dag-green.png`.
 
 ---
 
@@ -596,7 +563,7 @@ requests by endpoint, scoring errors, prediction-latency stats (count/sum/avg), 
 totals, plus `model_version`, `model_source`, and `last_deploy`.
 
 #### `GET /metrics`
-The **Prometheus exposition** endpoint (`text/plain`) scraped by the course Prometheus. Refreshes the
+The **Prometheus exposition** endpoint (`text/plain`) scraped by Prometheus. Refreshes the
 `model_loaded` and deploy gauges at scrape time, then returns `generate_latest()`.
 
 #### `GET /deploy-status` *(our addition — deploy observability)*
@@ -604,10 +571,6 @@ JSON `{latest, recent (last 20), total_recorded, status}` by default; `?format=h
 `Accept: text/html`) renders an **inline-SVG pipeline flowchart** (new commit → fast-forward → test
 gate → restart / trigger / import / retrain, each node coloured by outcome) above a recent-runs
 table. Degrades to `status: "unknown"` if the CD run-log is absent — it can never affect serving.
-
-> 📸 **Screenshot placeholders:** the **Swagger UI** at `/docs` (`docs/images/swagger.png`); a
-> `/predict` request/response in Swagger (`docs/images/predict-demo.png`); the `/deploy-status?format=html`
-> flowchart (`docs/images/deploy-flowchart.png`).
 
 ### 12.3 Cross-cutting middleware
 
@@ -655,9 +618,9 @@ idiom for exposing text.
 ## 14. Observability: Grafana dashboard
 
 **Dashboard:** `grafana/dashboards/delivery_risk_prometheus.json`
-(uid `delivery-delivery-risk-prom`, title *"Delivery — Delivery-Risk Service (Prometheus)"*), imported
-into the shared Grafana **delivery folder**. Every panel is **instance-pinned** via an `$instance`
-template variable (default `host.docker.internal:8112`) so it never blends other groups' series.
+(uid `delivery-risk`, title *"Delivery-Risk Service (Prometheus)"*). It is **auto-provisioned** on
+`docker compose up` (see `grafana/provisioning/`) along with the Prometheus datasource. Every panel
+is **instance-pinned** via an `$instance` template variable (default `api:8112`).
 
 The dashboard is deliberately organised into **two rows with no overlapping panels** — service health
 on top, deployment health below.
@@ -666,7 +629,7 @@ on top, deployment health below.
 
 | # | Panel | Query (essence) | What it shows |
 |---|---|---|---|
-| 1 | **API up** (stat) | `up{job="capstone_group_apis", instance=…}` | Is the service being scraped & alive. |
+| 1 | **API up** (stat) | `up{job="delivery_risk_api", instance=…}` | Is the service being scraped & alive. |
 | 2 | **Model loaded** (stat) | `delivery_model_loaded` | 1 = real model, 0 = baseline. |
 | 3 | **Total predictions** (stat) | `sum(delivery_predictions_total)` | Lifetime prediction count. |
 | 4 | **Scoring errors** (stat) | `sum(delivery_prediction_errors_total)` | Times scoring degraded to baseline. |
@@ -688,14 +651,6 @@ on top, deployment health below.
 | 25 | **Last deploy commit** (table) | `delivery_deploy_last_commit_info` | Commit SHA + status (from labels). |
 | 27 | **Last retrain state** (table) | `delivery_deploy_last_retrain_info` | Retrain state + Airflow run id. |
 
-> 📸 **Screenshot placeholders:** the full dashboard (`docs/images/grafana-overview.png`); a close-up
-> of the risk-distribution pie + latency panel (`docs/images/grafana-service.png`); the Deployment
-> row (`docs/images/grafana-deploy.png`).
-
-> **Note on live-render limitation:** the shared Grafana has **no Image-Renderer plugin**, so
-> server-side PNG export (`/render`) is unavailable and the web UI needs a real login session — take
-> screenshots from a logged-in browser rather than an unauthenticated URL.
-
 ---
 
 ## 15. Observability: structured logging
@@ -707,76 +662,41 @@ ingestion, `text` for local reading) are env-driven. Each `/predict` logs a `pre
 logs an access event with `method`, `endpoint`, `status`, `latency_ms`. Metrics scrapes are logged at
 `DEBUG` to keep the stream quiet; 5xx responses are logged at `WARNING`.
 
-> 📸 **Screenshot placeholder:** a few lines of the JSON log stream (`journalctl --user -u
-> delivery-capstone-api.service`) showing a prediction event with its `request_id` —
-> `docs/images/logs.png`.
-
 ---
 
-## 16. CI/CD: the VM-side deployment hook
+## 16. CI/CD
 
-**Directory:** `ci/`.
+### 16.1 CI — GitHub Actions
 
-### 16.1 Why not GitLab-native CI/CD
-
-GitLab-native CI/CD was **not available** to us: the delivery account is a **Developer** on the
-project (no rights to CI/CD secret variables or pipeline triggers — confirmed `403` via the API),
-and **no GitLab runner exists** (the only prior pipeline never executed). A mentor grant was not
-available. `main` is unprotected, so the VM *can* pull freely. We therefore built a **pull-based
-continuous-deployment hook that runs on the group VM**.
-
-### 16.2 How the hook works (`ci/deploy_hook.sh`)
-
-A **systemd user timer** (`delivery-deploy.timer`, every ~2 min, `flock`-serialised) runs the hook:
+Continuous integration runs in **GitHub Actions** (`.github/workflows/ci.yml`) on every push and
+pull request:
 
 ```
-0. reconcile the previous deploy's retrain outcome (one Airflow poll, non-blocking)
-1. git fetch origin main    → if no new commit, exit quietly
-2. compute changed paths (old..new)
-3. git merge --ff-only      → never rewrite/clobber; a divergence records `ff_failed`
-4. pytest gate              → a red build is NOT shipped (records `tests_failed`)
-5. change-gated actions:
-     app/** | pipeline/** | requirements.txt  → restart the API (then poll /health ~30s)
-     pipeline/** | app/config.py               → trigger the Airflow retrain DAG (fire-and-forget)
-     grafana/dashboards/**                     → re-import the Grafana dashboards
-     docs/notebooks only                       → advance the checkout, no heavy action
-6. record one JSONL run record (best-effort, cannot change the exit code)
+test:    install requirements → pytest -q tests          (a red build blocks the change)
+docker:  docker build -t delivery-risk-api .  →  docker compose config --quiet
 ```
 
-**Security:** no secrets in the repo — git auth comes from `~/.git-credentials`; the trigger/import
-helpers read `~/.deploy-secrets` (both `chmod 600`, VM-only).
+The tests run in-process (no DB/MLflow needed), so CI is fast and hermetic.
 
-### 16.3 Deploy monitoring (because there's no CI UI)
+### 16.2 Deploy monitoring (`ci/record_run.py`)
 
-Every **real** deploy attempt appends a structured record to `~/deploy-runs.jsonl`
-(`status ∈ success | tests_failed | ff_failed | error`, changed paths, per-action results,
-duration). The **Airflow retrain is asynchronous**: the hook records `trigger: queued` + the
-`dag_run_id`, and a sibling `ci/watch_dag.py` — driven by the *same* timer, not a detached process —
-polls Airflow once per tick and appends the terminal outcome (`success | failed | timeout`) to
-`~/deploy-retrain.jsonl`. The FastAPI service reads both files **on demand** and surfaces them via
-`/deploy-status` (flowchart) and the `delivery_deploy_*` gauges (§13) — **no new service, port, or
-database**. Verified live end-to-end on the VM: pushes redeployed the API, re-imported Grafana,
-triggered Airflow, and the flowchart tracked a retrain **running → success**.
-
-### 16.4 Helper scripts
-
-| File | Role |
-|---|---|
-| `ci/deploy_hook.sh` | the hook (reconcile → fetch → gate → conditional deploy → record) |
-| `ci/record_run.py` | append one JSONL deploy record |
-| `ci/watch_dag.py` | reconcile the triggered retrain's outcome (per-tick, non-blocking) |
-| `ci/trigger_dag.py` | trigger `delivery_capstone_workflow` on the course Airflow, write back the run id |
-| `ci/import_grafana.py` | POST `grafana/dashboards/*.json` to Grafana (overwrite) |
-| `ci/systemd/delivery-deploy.{service,timer}` | the oneshot + ~2-min timer |
-
-> 📸 **Screenshot placeholder:** `systemctl --user list-timers` showing the deploy timer, and a tail
-> of `~/deploy-hook.log` for one successful deploy — `docs/images/cd-hook.png`.
+The API surfaces a small deploy-history feature without a separate database. Call
+`ci/record_run.py` at the end of a deploy (from a CD job or a local deploy script) and it appends a
+structured record to `~/deploy-runs.jsonl` (`status ∈ success | tests_failed | ff_failed | error`,
+changed paths, per-action results, duration). The FastAPI service reads it **on demand** and
+surfaces it via `/deploy-status` (a pipeline flowchart) and the `delivery_deploy_*` gauges (§13) —
+no new service, port, or database. The retrain outcome can be recorded asynchronously into
+`~/deploy-retrain.jsonl`, so the flowchart shows a retrain as **running → success/failed**.
 
 ---
 
 ## 17. Docker & deployment
 
-**`Dockerfile`** builds the **API service** image only (training/orchestration are separate):
+The whole platform is defined in **`docker-compose.yaml`** (§3). `docker compose up -d` builds the
+API and Airflow images, pulls the rest, and wires them together by service name.
+
+**`Dockerfile`** builds the **API service** image only (training/orchestration run in the Airflow
+container):
 
 - base `python:3.11-slim`; deps installed in a cached layer; **only `app/` is copied** (see
   `.dockerignore`);
@@ -786,154 +706,120 @@ triggered Airflow, and the flowchart tracked a retrain **running → success**.
 - a `HEALTHCHECK` curls `/health`; `CMD` runs uvicorn on `:8112`.
 
 ```bash
-docker build -t delivery-api .
-docker run --rm -p 8112:8112 --env-file .env delivery-api
+# The stack:
+docker compose up -d --build
+# Just the API image, standalone:
+docker build -t delivery-risk-api .
+docker run --rm -p 8112:8112 --env-file .env delivery-risk-api
 # serve a local joblib model:
-#   -v /path/to/pipeline.pkl:/models/pipeline.pkl -e MODEL_PATH=/models/pipeline.pkl
+#   -v /path/to/model.joblib:/models/model.joblib -e MODEL_PATH=/models/model.joblib
 ```
-
-On the server the API runs as a **systemd user service** (`delivery-capstone-api.service`,
-`Restart=always`, linger enabled) so it survives logout/crash/reboot.
 
 ---
 
 ## 18. Security & isolation
 
-Isolation/security is explicitly graded. What we did, and what we observed:
-
-**What we did:**
-- **No credentials in git** — `.env`, `PROJECT_CREDENTIALS.txt`, `ssh_credentials.txt` are all
-  gitignored; `.env.example` is the committed template. The DAG and CI scripts carry **zero**
-  secrets (they read VM-side files).
-- **Least-baked images** — the Docker image contains no model, data, or secrets and runs as a
-  non-root user.
-- **Env-driven config** everywhere, so nothing is hardcoded per environment.
-- **`.gitignore`** excludes `.venv/`, `data/`, `artifacts/`, `mlruns/`, `models/`, `*.csv`, the raw
-  `olist_data/`, and the local MLflow state.
-
-**Infra gaps we can cite (course-level, not ours):**
-- `ps aux` on the shared host leaks every group's Postgres password via each MLflow server's
-  `--backend-store-uri`.
-- The shared Postgres is reachable from the **public IP** on port 32112.
-- Multiple groups emit **unprefixed** `delivery_*` metrics into the shared Prometheus (name
-  collisions) — we defend by instance-pinning every query.
+- **No credentials in git** — `.env` and any credential files are gitignored; `.env.example` is the
+  committed template. The DAG and CI scripts carry **zero** secrets; everything is read from the
+  environment.
+- **Least-baked images** — the API image contains no model, data, or secrets and runs as a
+  non-root user (uid 10001).
+- **Env-driven config** everywhere, so nothing is hardcoded per environment; the same image runs
+  in compose or on a host.
+- **`.gitignore`** excludes `.venv/`, `data/`, `artifacts/`, `mlruns/`, `models/`, `*.csv` (except
+  the committed `sample_data/`), the raw `olist_data/`, and local MLflow state.
+- **Leakage firewall** (§6) is itself a data-safety control: outcome/review fields can never enter
+  the model, enforced in three independent layers.
 
 ---
 
-## 19. Repository organization & version-control hygiene
+## 19. Repository organization
 
-Per the mentor's guidance, the GitLab repository has been organised into a clean, conventional
-layout. **Committed** (source, tests, docs, infra-as-code, dependency manifest):
+A clean, conventional layout — **committed** (source, tests, docs, infra-as-code, dependency manifest):
 
 ```
-delivery-project/
+delivery-risk-mlops/
 ├── app/                     # FastAPI service (config, schemas, model_loader, predictor,
 │                            #   metrics, middleware, logging, deploy_status/view, main)
 ├── pipeline/                # load_raw, features, train, register, batch_predict, monitor,
 │                            #   smoke_test, db
 ├── airflow/
-│   ├── dags/capstone_pipeline.py          # the graded SSH-bridge DAG
-│   ├── dags/delivery_delivery_risk_pipeline.py  # local-Airflow TaskFlow variant
-│   └── docker-compose.override.yaml       # local Airflow bridge
-├── ci/                      # VM-side CD hook + systemd units + README
-├── grafana/dashboards/      # dashboard JSON (+ README)
+│   ├── dags/delivery_risk_pipeline.py   # the orchestration DAG (local python -m pipeline.X)
+│   └── Dockerfile                       # Airflow image with the pipeline in an isolated venv
+├── sample_data/             # committed synthetic Olist-shaped dataset (zero-config demo)
+├── scripts/                 # make_sample_data.py, fetch_data.sh (Kaggle)
+├── ci/                      # record_run.py (deploy-record helper) + README
+├── grafana/                 # dashboard JSON + provisioning (datasource + dashboard)
 ├── tests/test_api.py        # contract + leakage + observability + deploy-status tests
 ├── docs/                    # ← this documentation (+ images/)
-├── Dockerfile, .dockerignore
-├── requirements.txt
+├── docker-compose.yaml, prometheus.yml, Makefile
+├── Dockerfile, .dockerignore, requirements.txt
+├── .github/workflows/ci.yml # CI
 ├── .env.example             # committed template (real .env is gitignored)
-├── STUDENT_BRIEF.md, README.md
+├── README.md, LICENSE
 └── .gitignore
 ```
 
-**Never committed** (gitignored): `.venv/`, `.env`, `olist_data/` and any `*.csv`, `artifacts/`,
-`models/`, `mlruns/`, local MLflow state, and the two credential files.
-
-**Cleanup performed / recommended for the final push:**
-- Consolidate the three overlapping READMEs (`README.md`, `README-1.md`, `README.API.md`) into a
-  single top-level `README.md` and move the API-specific notes under `docs/`.
-- Remove stray artifacts from the working tree before the final commit:
-  `empty_test_text.txt`, `README-1.md`, and the binary `project.pdf`
-  (the brief is already captured in `STUDENT_BRIEF.md`).
-- Keep `TODO.md` (or fold it into this doc) — it's a useful audit trail of what shipped.
-- Branch hygiene: work merged to `main` via merge requests (MR !4 consolidated `Alireza → main`;
-  MR !5 added the deploy-monitoring UI); `main` is the canonical checkout on the VM.
-
-> ✅ **For the presentation:** open the GitLab project, show this clean tree, the merged MRs, and
-> the green commit history — then state explicitly that the repository was organised (secrets and
-> generated artifacts excluded via `.gitignore`, one clear directory per concern, docs under `docs/`).
-
-> 📸 **Screenshot placeholder:** the GitLab repository file tree + the merge-requests page —
-> `docs/images/gitlab-repo.png`.
+**Never committed** (gitignored): `.venv/`, `.env`, `olist_data/` and any non-sample `*.csv`,
+`artifacts/`, `models/`, `mlruns/`, and local MLflow state.
 
 ---
 
 ## 20. Known limitations & future work
 
-- **Model quality vs benchmark-team.** On an identical test window we trail benchmark-team (ROC-AUC 0.659 vs
-  0.747). The gap is **feature engineering**, not the algorithm: they use **customer geography**
-  (`customer_state`, seller↔customer same-state) and cross-state interactions. Our `customers` table
-  already holds `customer_state`, so the concrete next step is to extend `featureset_v1` (and the API
-  contract) with customer-geography + distance-interaction features and retrain. Explicitly deferred,
-  not abandoned.
-- **Probability calibration.** The winner was trained class-balanced, so mean predicted P(late)
-  (~0.41) sits well above the 8% base rate; **ranking** (ROC-AUC 0.72) is fine but the absolute
-  probabilities are optimistic. Recalibrate (e.g. Platt/isotonic) or raise the risk thresholds for a
-  realistic risk mix in the demo.
-- **Shared-DB flakiness (environmental).** The shared Postgres periodically hits global
-  `max_connections` ("reserved for SUPERuser"), which can fail a pipeline/DAG run transiently. The
-  API is unaffected (model held in memory, no per-request DB). Recommended hardening: bump the DAG
-  `default_args.retries` 0 → 2 with a delay so these blips self-heal.
-- **Drift-demo data.** Because the source is a fixed historical dataset, "drift" is demonstrated over
+- **Model accuracy is not the focus.** The strongest missing signal is **customer geography**: the
+  raw `customers` table holds `customer_state`, and modelling seller↔customer distance (e.g. a
+  `customer_seller_same_state` interaction) is the most promising accuracy improvement. Extending
+  `featureset_v1` (and the API contract) with those features and retraining is the obvious next step.
+- **Probability calibration.** The winner is trained class-balanced, so mean predicted P(late) sits
+  above the base rate; **ranking** (ROC-AUC) is fine but the absolute probabilities are optimistic.
+  Recalibrate (Platt/isotonic) or tune the risk thresholds for a realistic risk mix.
+- **Drift-demo data.** The source is a fixed historical dataset, so "drift" is demonstrated over
   temporal windows; a live stream would use rolling windows.
 
 ---
 
-## Appendix A — Demo & screenshot checklist
+## Appendix A — Demo walkthrough
 
-A suggested order for the live evaluator demo, with the capture to take at each step:
+A suggested order for a live demo:
 
-1. **GitLab** — clean repo tree + merged MRs → *"repository organised"*. `gitlab-repo.png`
-2. **Airflow** — trigger `delivery_capstone_workflow`, show the fully green graph. `airflow-dag-green.png`
-3. **MLflow** — the experiment with 3 candidate runs compared; the registry with multiple
-   `delivery-risk` versions and one in **Staging**. `mlflow-compare.png`, `mlflow-registry.png`
-4. **Feature importance** — the bar chart; call out `shipping_window_days` as the dominant driver.
-   `feature-importance.png`
-5. **API** — Swagger `/docs`; a live `/predict` (low & high risk); `/model-info` showing the real
-   Staging model; `/health`. `swagger.png`, `predict-demo.png`
-6. **Monitoring** — the `monitoring_report.json` / `monitoring_metrics` drift verdict. `monitoring-report.png`
-7. **Grafana** — the full dashboard (service row + deployment row), live numbers. `grafana-overview.png`
-8. **CD hook** — push a trivial change, watch the timer redeploy; show `/deploy-status?format=html`.
-   `deploy-flowchart.png`, `cd-hook.png`
-9. **Logs** — the structured JSON log stream with `request_id` correlation. `logs.png`
+1. `docker compose up -d --build` — the whole stack comes up.
+2. `make bootstrap` — the pipeline runs load → features → train → register → predict → monitor.
+3. **MLflow** (`:5312`) — the experiment with 3 candidate runs compared; the registry with a
+   `delivery-risk` version in **Staging**.
+4. **API** (`:8112/docs`) — a live `/predict` (low & high risk); `/model-info` showing the real
+   Staging model; `/health`.
+5. **Airflow** (`:8080`) — trigger `delivery_risk_pipeline`, watch the graph go green.
+6. **Grafana** (`:3000`) — the dashboard with live numbers.
+7. **Deploy status** — `GET /deploy-status?format=html` for the CD flowchart.
 
 ---
 
 ## Appendix B — Command reference
 
 ```bash
-# ---- environment ----
-python3 -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt          # local (PyPI)
-# server: pip install --no-index --find-links /opt/MLOps/MlOps/project/capstone_stack/wheelhouse ...
+# ---- the whole stack ----
+docker compose up -d --build
+make bootstrap                 # DATA=sample (default) or DATA=full
 
 # ---- tests ----
-.venv/bin/python -m pytest -q tests
-
-# ---- run the API ----
-.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8112
+make test                      # in the API image
+pytest -q tests                # or locally, with deps installed and PYTHONPATH=.
 
 # ---- run the pipeline by hand (each is an Airflow task) ----
-.venv/bin/python -m pipeline.load_raw --clear
-.venv/bin/python -m pipeline.features
-.venv/bin/python -m pipeline.train
-.venv/bin/python -m pipeline.register
-.venv/bin/python -m pipeline.smoke_test
-.venv/bin/python -m pipeline.batch_predict
-.venv/bin/python -m pipeline.monitor
+python -m pipeline.load_raw --clear
+python -m pipeline.features
+python -m pipeline.train
+python -m pipeline.register
+python -m pipeline.smoke_test
+python -m pipeline.batch_predict
+python -m pipeline.monitor
+
+# ---- regenerate the committed sample dataset ----
+python scripts/make_sample_data.py
 
 # ---- reproduce the feature-importance table (§5.3) ----
-.venv/bin/python -c "import joblib,pandas as pd; \
+python -c "import joblib,pandas as pd; \
 from app.config import FEATURE_COLUMNS; from sklearn.inspection import permutation_importance; \
 df=pd.read_csv('artifacts/featureset_v1.csv'); ts=pd.to_datetime(df.purchase_ts); ev=df[ts>=ts.quantile(0.8)]; \
 m=joblib.load('artifacts/model.joblib'); \
@@ -943,5 +829,4 @@ print(pd.Series(r.importances_mean,index=FEATURE_COLUMNS).sort_values(ascending=
 
 ---
 
-*End of document. Replace each 📸 placeholder with a screenshot under `docs/images/` before
-exporting to PDF for the presentation.*
+*End of document.*
