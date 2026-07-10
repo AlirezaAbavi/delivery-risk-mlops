@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Append one structured JSON record for a deploy-hook run to ~/deploy-runs.jsonl.
+"""Append one structured JSON record for a deploy run to ~/deploy-runs.jsonl.
 
-Called by deploy_hook.sh at the end of every *real* deploy attempt (a new commit
-on origin/main), including failures. Doing the JSON encoding here — instead of in
-bash — keeps changed-path lists and error strings safely escaped, and reuses the
-venv python the hook already depends on.
+Call this at the end of a deploy (e.g. from a CD job or a local deploy script),
+including on failure. It powers the API's /deploy-status page and the
+delivery_deploy_* Prometheus metrics without needing a separate database. Doing the
+JSON encoding here — instead of in shell — keeps changed-path lists and error strings
+safely escaped.
 
-All inputs arrive as environment variables so the hook never has to quote them:
+All inputs arrive as environment variables so the caller never has to quote them:
 
     DR_STARTED_AT, DR_FINISHED_AT   ISO-8601 UTC timestamps
     DR_DURATION_SECONDS             integer seconds
