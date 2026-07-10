@@ -14,6 +14,9 @@ models/
 # Raw data — never commit
 olist_data/
 *.csv
+# ...except the committed synthetic sample dataset for the zero-config demo
+!sample_data/
+!sample_data/*.csv
 
 # Secrets — never commit
 PROJECT_CREDENTIALS.txt
