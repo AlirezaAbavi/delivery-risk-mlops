@@ -72,7 +72,20 @@ services:
     build:
       context: .
       dockerfile: airflow/Dockerfile
-    command: standalone
+    # `airflow standalone` always creates its own `admin` user with a RANDOM password
+    # (written to $AIRFLOW_HOME/standalone_admin_password.txt) and ignores
+    # _AIRFLOW_WWW_USER_*. To make the documented admin/admin login actually work, we
+    # run standalone as PID 1 and, in a one-shot background task, reset the admin
+    # password to ${AIRFLOW_PASSWORD} once standalone has created the user.
+    command:
+      - bash
+      - -c
+      - |
+        (
+          until airflow users list 2>/dev/null | grep -qw "${AIRFLOW_USER:-admin}"; do sleep 3; done
+          airflow users reset-password --username "${AIRFLOW_USER:-admin}" --password "${AIRFLOW_PASSWORD:-admin}"
+        ) &
+        exec airflow standalone
     environment:
       # Airflow keeps its own metadata in a container-local SQLite DB (SequentialExecutor);
       # the pipeline's *data* lives in the separate `postgres` service below.
