@@ -1,0 +1,27 @@
+# CI-only override so a throwaway copy of the stack can run on the SAME host as a live one
+# without colliding. Use it with a distinct project name and the base file, e.g.:
+#
+#   docker compose -p drci -f docker-compose.yaml -f docker-compose.ci.yml up -d --build --wait
+#
+# Two kinds of isolation:
+#   * `ports: !reset []` clears every service's published host ports (needs Compose >= 2.24),
+#     so the ephemeral stack never fights the live stack for 8112/5312/8080/... Validation
+#     talks to services over the internal network via `docker compose exec`.
+#   * the api service pins a fixed `image: delivery-risk-api`, which is the SAME tag the live
+#     stack uses — building it here would overwrite the live image. Renaming it to
+#     `delivery-risk-api-ci` keeps the ephemeral build off the live tag. (airflow has no
+#     explicit image, so the distinct project name isolates it automatically.)
+services:
+  postgres:
+    ports: !reset []
+  mlflow:
+    ports: !reset []
+  api:
+    image: delivery-risk-api-ci
+    ports: !reset []
+  airflow:
+    ports: !reset []
+  prometheus:
+    ports: !reset []
+  grafana:
+    ports: !reset []

@@ -1,0 +1,172 @@
+name: cd
+
+# Selective continuous deployment. On every push to main we look at WHAT changed and, per
+# scope, VALIDATE first and only then APPLY that change to the live stack — touching nothing
+# else. The rule is: main must never leave the running product broken.
+#
+#   app/** only                         -> run tests               -> rebuild + restart the api
+#   pipeline / serving deps / compose   -> run tests + a full pipeline (DAG) run on a
+#                                          throwaway stack          -> rebuild + restart api &
+#                                          airflow, then run the pipeline on live
+#   grafana/**                          -> validate dashboard JSON  -> recreate ONLY grafana
+#
+# A successful end-to-end pipeline run is part of the gate: pipeline code is not applied to
+# live until it has trained, registered and served a model on an isolated ephemeral stack.
+#
+# ── PREREQUISITES (one-time host setup) ────────────────────────────────────────────────
+#  1. Register a GitHub Actions *self-hosted* runner on the machine that runs the live stack
+#     (Settings > Actions > Runners). The deploy jobs below use `runs-on: [self-hosted]`;
+#     change the label if yours differs.
+#  2. Set a repository variable DEPLOY_DIR to a DEDICATED deploy checkout of this repo — NOT
+#     your dev working copy. The apply step runs `git checkout --force`, which discards local
+#     changes. e.g. Settings > Secrets and variables > Actions > Variables:
+#         DEPLOY_DIR = /srv/delivery-risk-mlops
+#     (create it once with:  git clone <repo> /srv/delivery-risk-mlops)
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  # Serialize: never let two runs mutate the live stack (or the shared image tags) at once.
+  group: cd-live
+  cancel-in-progress: false
+
+jobs:
+  # ── Decide which scopes changed ────────────────────────────────────────────────────────
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      api: ${{ steps.filter.outputs.api }}
+      pipeline: ${{ steps.filter.outputs.pipeline }}
+      grafana: ${{ steps.filter.outputs.grafana }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            api:
+              - 'app/**'
+            pipeline:
+              - 'pipeline/**'
+              - 'airflow/**'
+              - 'sample_data/**'
+              - 'scripts/**'
+              - 'requirements.txt'
+              - 'Dockerfile'
+              - 'docker-compose.yaml'
+              - 'docker-compose.ci.yml'
+              - 'Makefile'
+            grafana:
+              - 'grafana/**'
+
+  # ── API ONLY: tests must pass, then rebuild + restart just the api ─────────────────────
+  deploy-api:
+    needs: detect
+    # "only about the api": app/** changed, and nothing that requires the full pipeline check.
+    # (Dockerfile/requirements/compose live in the `pipeline` scope because they can change
+    # model compatibility, which only a train+serve run can catch.)
+    if: needs.detect.outputs.api == 'true' && needs.detect.outputs.pipeline != 'true'
+    runs-on: [self-hosted]
+    env:
+      # Build & run tests in an isolated project/tag so we never touch the live `delivery-risk-api`
+      # image before the change is validated.
+      CI_COMPOSE: docker compose -p drci -f docker-compose.yaml -f docker-compose.ci.yml
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run tests (built from the new code)
+        run: |
+          $CI_COMPOSE build api
+          $CI_COMPOSE run --rm --no-deps -e LOAD_MODEL_ON_STARTUP=false -e PYTHONPATH=/app \
+            -v "${{ github.workspace }}/tests:/app/tests" api \
+            sh -c "pip install -q pytest httpx && pytest -q tests"
+
+      - name: Apply — rebuild & restart ONLY the api on the live stack
+        env:
+          DEPLOY_DIR: ${{ vars.DEPLOY_DIR }}
+        run: |
+          test -n "$DEPLOY_DIR" || { echo "::error::DEPLOY_DIR repository variable is not set"; exit 1; }
+          cd "$DEPLOY_DIR"
+          git fetch --all --prune
+          git checkout --force "${{ github.sha }}"
+          docker compose up -d --build --no-deps api
+          for i in $(seq 1 30); do curl -sf http://localhost:8112/health >/dev/null && break; sleep 2; done
+          curl -sf http://localhost:8112/health | tee /dev/stderr | grep -q '"status":"ok"' \
+            || { echo "::error::live api not healthy after restart"; exit 1; }
+
+  # ── PIPELINE: tests + full ephemeral DAG run must pass, then apply to live ─────────────
+  deploy-pipeline:
+    needs: detect
+    if: needs.detect.outputs.pipeline == 'true'
+    runs-on: [self-hosted]
+    env:
+      # Throwaway, fully isolated stack: distinct project name + reset ports + non-live image
+      # tag (docker-compose.ci.yml), so it can't disturb the live stack on this same host.
+      CI_COMPOSE: docker compose -p drci -f docker-compose.yaml -f docker-compose.ci.yml
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run tests
+        run: |
+          $CI_COMPOSE build api
+          $CI_COMPOSE run --rm --no-deps -e LOAD_MODEL_ON_STARTUP=false -e PYTHONPATH=/app \
+            -v "${{ github.workspace }}/tests:/app/tests" api \
+            sh -c "pip install -q pytest httpx && pytest -q tests"
+
+      - name: Validate the pipeline end-to-end on a throwaway stack
+        run: |
+          set -e
+          make up        COMPOSE="$CI_COMPOSE"          # build + start the isolated stack, wait healthy
+          make bootstrap COMPOSE="$CI_COMPOSE"          # load -> features -> train -> register -> predict -> monitor (== the DAG)
+          # A successful run must leave the api serving the freshly registered model. Ports are
+          # reset, so assert over the internal network via exec. This is what catches a
+          # train/serve mismatch that would otherwise ship a broken product.
+          $CI_COMPOSE exec -T api python -c "import json,urllib.request; d=json.load(urllib.request.urlopen('http://127.0.0.1:8112/model-info')); print(d); assert d['source']=='mlflow' and d['is_real_model'], 'api is not serving the registered model'"
+
+      - name: Apply — deploy new pipeline + serving to live and run it there
+        env:
+          DEPLOY_DIR: ${{ vars.DEPLOY_DIR }}
+        run: |
+          test -n "$DEPLOY_DIR" || { echo "::error::DEPLOY_DIR repository variable is not set"; exit 1; }
+          cd "$DEPLOY_DIR"
+          git fetch --all --prune
+          git checkout --force "${{ github.sha }}"
+          docker compose up -d --build --wait               # rebuild images from validated code, wait healthy
+          make bootstrap                                    # run the new pipeline on live so it serves the new model
+          for i in $(seq 1 30); do curl -sf http://localhost:8112/health >/dev/null && break; sleep 2; done
+          curl -sf http://localhost:8112/model-info | tee /dev/stderr | grep -q '"is_real_model":true' \
+            || { echo "::error::live api not serving the registered model after deploy"; exit 1; }
+
+      - name: Tear down the throwaway stack
+        if: always()
+        run: make clean COMPOSE="$CI_COMPOSE"
+
+  # ── GRAFANA: validate dashboard JSON, then recreate ONLY grafana ──────────────────────
+  deploy-grafana:
+    needs: detect
+    if: needs.detect.outputs.grafana == 'true'
+    runs-on: [self-hosted]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate dashboard JSON parses
+        run: |
+          for f in grafana/dashboards/*.json; do
+            python3 -c "import json; json.load(open('$f'))" && echo "ok: $f"
+          done
+
+      - name: Apply — recreate ONLY grafana on the live stack
+        env:
+          DEPLOY_DIR: ${{ vars.DEPLOY_DIR }}
+        run: |
+          test -n "$DEPLOY_DIR" || { echo "::error::DEPLOY_DIR repository variable is not set"; exit 1; }
+          cd "$DEPLOY_DIR"
+          git fetch --all --prune
+          git checkout --force "${{ github.sha }}"
+          # grafana re-reads its provisioning (datasource + dashboards) on recreate; --no-deps
+          # means nothing else on the live stack is touched.
+          docker compose up -d --force-recreate --no-deps grafana
