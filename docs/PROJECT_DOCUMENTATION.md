@@ -669,16 +669,55 @@ logs an access event with `method`, `endpoint`, `status`, `latency_ms`. Metrics 
 ### 16.1 CI — GitHub Actions
 
 Continuous integration runs in **GitHub Actions** (`.github/workflows/ci.yml`) on every push and
-pull request:
+pull request, on GitHub-hosted runners:
 
 ```
-test:    install requirements → pytest -q tests          (a red build blocks the change)
+test:    setup-python 3.12 → install requirements → pytest -q tests   (a red build blocks the change)
 docker:  docker build -t delivery-risk-api .  →  docker compose config --quiet
 ```
 
-The tests run in-process (no DB/MLflow needed), so CI is fast and hermetic.
+The tests run in-process (no DB/MLflow needed), so CI is fast and hermetic. Python **3.12** matches
+the runtime (the API image and the pipeline venv both run 3.12), so CI can't pass on a version that
+would segfault in production.
 
-### 16.2 Deploy monitoring (`ci/record_run.py`)
+### 16.2 Selective CD — GitHub Actions (`.github/workflows/cd.yml`)
+
+Continuous *deployment* runs on every push to `main` and is **change-scoped**: it inspects what
+changed (via `dorny/paths-filter`) and, per scope, **validates first and applies only that scope** to
+the live stack — touching nothing else. The invariant is: `main` must never leave the running product
+broken.
+
+| Scope (paths) | Validate | Apply to live |
+|---|---|---|
+| **api** — `app/**` only | build the image + run the tests | `docker compose up -d --build --no-deps api`, then poll `/health` |
+| **pipeline** — `pipeline/**`, `airflow/**`, `Dockerfile`, `requirements.txt`, `docker-compose*.yaml`, `Makefile`, `scripts/**`, `sample_data/**` | run tests **and** a full `make bootstrap` (load→features→train→register→predict→monitor — the same steps as the DAG) on an isolated throwaway stack, asserting the api serves the freshly registered model (`source=mlflow`, `is_real_model`) | rebuild api + airflow, run the pipeline on live, verify `/model-info` |
+| **grafana** — `grafana/**` | assert every dashboard JSON parses | `docker compose up -d --force-recreate --no-deps grafana` |
+
+A **successful end-to-end pipeline run is part of the gate** — pipeline code is never applied to live
+until it has trained, registered, and served a model on an ephemeral stack. That ephemeral stack is
+isolated from the live one on the same host by **`docker-compose.ci.yml`**: a distinct compose
+project name (`-p drci`), `ports: !reset []` on every service (so it never fights the live stack for
+`8112`/`5312`/`8080`/…; validation talks to services over the internal network via
+`docker compose exec`), and a non-live image tag (`delivery-risk-api-ci`, so building it can't
+overwrite the live `delivery-risk-api` image). This is the check that catches a train/serve Python
+mismatch before it can ship.
+
+`concurrency: {group: cd-live, cancel-in-progress: false}` serializes runs so two never mutate the
+live stack (or the shared image tags) at once.
+
+**Host prerequisites** (automated by `scripts/setup-self-hosted-runner.sh`):
+
+- a GitHub Actions **self-hosted runner** on the machine that hosts the live stack (the deploy jobs
+  use `runs-on: [self-hosted]`);
+- a repository variable **`DEPLOY_DIR`** pointing at a *dedicated* deploy checkout — **not** your dev
+  working copy, because the apply step runs `git checkout --force`, which discards local changes.
+
+The script installs `gh`, creates and pushes the GitHub repo if the origin isn't already GitHub,
+clones `DEPLOY_DIR` and sets the variable, then downloads, registers, and starts the runner. The only
+irreducibly manual steps are an interactive `gh auth login` and one `sudo` to install the runner
+service.
+
+### 16.3 Deploy monitoring (`ci/record_run.py`)
 
 The API surfaces a small deploy-history feature without a separate database. Call
 `ci/record_run.py` at the end of a deploy (from a CD job or a local deploy script) and it appends a
@@ -698,8 +737,11 @@ API and Airflow images, pulls the rest, and wires them together by service name.
 **`Dockerfile`** builds the **API service** image only (training/orchestration run in the Airflow
 container):
 
-- base `python:3.11-slim`; deps installed in a cached layer; **only `app/` is copied** (see
-  `.dockerignore`);
+- base `python:3.12-slim` — **must match the training environment** (Airflow's pipeline-venv also
+  runs Python 3.12). sklearn models are pickled with native numpy state that cannot be safely
+  unpickled across CPython versions; a train/serve mismatch segfaults the model loader (an
+  uncatchable native crash, exit 139), so serving and training share a Python version by design;
+- deps installed in a cached layer; **only `app/` is copied** (see `.dockerignore`);
 - runs as an **unprivileged user** (uid 10001) — isolation/security hygiene;
 - **no model, data, or secrets baked in** — the model is pulled from MLflow at runtime, or a joblib
   model is mounted via `MODEL_PATH`;

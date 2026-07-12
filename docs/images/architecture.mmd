@@ -1,0 +1,66 @@
+%% Delivery-Risk MLOps — system architecture
+%% Render:  mmdc -i docs/images/architecture.mmd -o docs/images/architecture.png -b transparent -s 2
+%% Live editor: https://mermaid.live
+flowchart LR
+    csv[("Raw CSVs<br/>sample_data/ · olist_data/")]
+
+    subgraph pg["Postgres — medallion warehouse"]
+        direction TB
+        raw["RAW<br/>load_raw"]
+        stg["STAGING"]
+        feat["FEATURES<br/>leak-free, purchase-time only"]
+        preds["PREDICTIONS"]
+        mon["MONITORING"]
+        raw --> stg --> feat
+    end
+
+    subgraph ml["Training & registry"]
+        direction TB
+        train["train.py<br/>3 models"]
+        mlflow["MLflow<br/>experiments + registry<br/>models:/delivery-risk/Staging"]
+        train --> mlflow
+    end
+
+    subgraph serve["Serving"]
+        direction TB
+        api["FastAPI :8112<br/>/predict · /health · /metrics"]
+        loader["model_loader<br/>registry → joblib → baseline"]
+        api --- loader
+    end
+
+    subgraph orch["Orchestration"]
+        airflow["Airflow :8080<br/>delivery_risk_pipeline DAG"]
+    end
+
+    subgraph obs["Observability"]
+        direction TB
+        prom["Prometheus :9090<br/>job delivery_risk_api"]
+        graf["Grafana :3000<br/>dashboards"]
+        prom --> graf
+    end
+
+    batch["batch_predict.py"]
+    monitor["monitor.py<br/>drift + decide_retrain (alert only)"]
+
+    csv --> raw
+    feat --> train
+    mlflow -. "resolve model" .-> loader
+    feat --> batch
+    loader --> batch
+    batch --> preds
+    preds --> monitor
+    feat --> monitor
+    monitor --> mon
+
+    api -- "/metrics scrape" --> prom
+    airflow -. "runs python -m pipeline.X<br/>(same steps as make bootstrap)" .-> pg
+    airflow -. .-> train
+    airflow -. .-> batch
+    airflow -. .-> monitor
+
+    classDef store fill:#e3f2fd,stroke:#1565c0,color:#0d1b2a;
+    classDef svc fill:#e8f5e9,stroke:#2e7d32,color:#0d1b2a;
+    classDef ops fill:#fff3e0,stroke:#ef6c00,color:#0d1b2a;
+    class raw,stg,feat,preds,mon,csv store;
+    class api,loader,mlflow,train,batch,monitor svc;
+    class airflow,prom,graf ops;
