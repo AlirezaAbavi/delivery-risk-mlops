@@ -3,7 +3,11 @@
 # service falls back to a mounted joblib model (MODEL_PATH) and finally to a bounded
 # arithmetic baseline (see app/model_loader.py). It never hard-fails on startup and
 # no model or data is baked into the image.
-FROM python:3.11-slim
+# Python 3.12 to match the pipeline/training environment (Airflow's pipeline-venv
+# runs on Python 3.12). Serving and training MUST share a Python version: sklearn
+# models are pickled with native (numpy) state that cannot be safely unpickled across
+# CPython versions, and a mismatch segfaults the loader (uncatchable in Python).
+FROM python:3.12-slim
 
 # Unbuffered stdout so JSON logs reach the collector promptly; no .pyc clutter.
 ENV PYTHONUNBUFFERED=1 \
