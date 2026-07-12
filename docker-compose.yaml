@@ -145,6 +145,32 @@ services:
     depends_on:
       - prometheus
 
+  # One-shot helper (not started by `up`; run via `make fetch-data`). Downloads the real
+  # Olist dataset from Kaggle inside a container, so the host needs no Python or kaggle CLI.
+  # Credentials come from .env (KAGGLE_USERNAME / KAGGLE_KEY). Files land in ./olist_data/olist_data,
+  # which is exactly RAW_DATA_DIR for `make bootstrap DATA=full`.
+  fetch-data:
+    profiles: ["tools"]
+    image: python:3.11-slim
+    environment:
+      KAGGLE_USERNAME: ${KAGGLE_USERNAME:-}
+      KAGGLE_KEY: ${KAGGLE_KEY:-}
+    volumes:
+      - ./olist_data:/data
+    entrypoint: ["sh", "-c"]
+    # $$ escapes compose interpolation so the shell (not compose) reads the env vars.
+    command:
+      - >
+        if [ -z "$$KAGGLE_USERNAME" ] || [ -z "$$KAGGLE_KEY" ]; then
+          echo "!! Set KAGGLE_USERNAME and KAGGLE_KEY in .env (copy from .env.example, get a token at kaggle.com -> Settings -> Create New Token)";
+          exit 1;
+        fi;
+        echo ">> installing kaggle CLI...";
+        pip install --no-cache-dir --timeout 30 --retries 5 kaggle &&
+        echo ">> downloading olistbr/brazilian-ecommerce (~120MB)..." &&
+        kaggle datasets download -d olistbr/brazilian-ecommerce -p /data/olist_data --unzip &&
+        echo ">> done. Now run:  make bootstrap DATA=full"
+
 volumes:
   postgres-data:
   mlflow-data:

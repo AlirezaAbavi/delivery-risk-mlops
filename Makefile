@@ -62,6 +62,7 @@ test:
 sample-data:
 	python scripts/make_sample_data.py
 
-# Download the real Olist dataset from Kaggle into olist_data/ (needs credentials).
+# Download the real Olist dataset from Kaggle into olist_data/ — runs in a container,
+# so the host needs no Python or kaggle CLI. Credentials come from .env (see .env.example).
 fetch-data:
-	bash scripts/fetch_data.sh
+	$(COMPOSE) run --rm fetch-data
