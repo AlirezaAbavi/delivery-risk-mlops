@@ -1,16 +1,19 @@
 # Delivery-risk MLOps stack — common tasks.
 #
-#   make up          bring up the whole stack (postgres, mlflow, api, airflow, prometheus, grafana)
-#   make bootstrap   run the pipeline once (load -> features -> train -> register -> predict -> monitor)
+#   make demo        ONE COMMAND: up (wait healthy) -> bootstrap -> reload api. Ready to use.
+#   make demo DATA=full   same, but fetch the real Kaggle dataset first and train on it
+#
+#   make up          bring up the whole stack and wait until it's healthy
+#   make bootstrap   run the pipeline once (load -> features -> train -> register -> predict -> monitor) and reload the api
+#   make fetch-data  download the real Olist dataset from Kaggle in a container (creds from .env; no host install)
+#   make reload      restart the api so it picks up the latest registered model
 #   make down        stop the stack (keep volumes)
 #   make clean       stop and remove volumes (wipes data/models)
 #   make test        run the test suite inside the api image
-#   make fetch-data  download the real Olist dataset from Kaggle (needs credentials)
 #   make logs        tail all service logs
 #
 # DATA selects the pipeline's input: `sample` (default, committed synthetic data) or
-# `full` (the Kaggle download fetched into olist_data/). Example:
-#   make bootstrap DATA=full
+# `full` (the Kaggle download in olist_data/). Example:  make demo DATA=full
 
 DATA ?= sample
 COMPOSE ?= docker compose
@@ -24,10 +27,21 @@ endif
 # Run a pipeline module in the airflow service's isolated venv (see airflow/Dockerfile).
 PIPELINE_EXEC = $(COMPOSE) exec -e RAW_DATA_DIR=$(RAW_DATA_DIR) -T airflow /home/airflow/pipeline-venv/bin/python -m
 
-.PHONY: up down clean bootstrap test fetch-data sample-data logs ps
+.PHONY: demo up down clean bootstrap reload test fetch-data sample-data logs ps
 
+# The whole thing, end to end, in one command. For DATA=full it fetches the Kaggle data first.
+demo:
+ifeq ($(DATA),full)
+	$(MAKE) fetch-data
+endif
+	$(MAKE) up
+	$(MAKE) bootstrap DATA=$(DATA)
+	@echo ""
+	@echo ">> ready:  API http://localhost:8112/docs  ·  MLflow :5312  ·  Airflow :8080  ·  Grafana :3000"
+
+# --wait blocks until healthchecks pass (postgres, mlflow, api) so bootstrap never races a cold service.
 up:
-	$(COMPOSE) up -d --build
+	$(COMPOSE) up -d --build --wait
 
 down:
 	$(COMPOSE) down
@@ -51,7 +65,13 @@ bootstrap:
 	$(PIPELINE_EXEC) pipeline.register
 	$(PIPELINE_EXEC) pipeline.batch_predict
 	$(PIPELINE_EXEC) pipeline.monitor
-	@echo ">> bootstrap complete — the API now serves the registered delivery-risk model"
+	$(MAKE) reload
+	@echo ">> bootstrap complete — the API now serves the freshly registered delivery-risk model"
+
+# The API resolves its model at startup and caches it, so restart it to pick up a new
+# Staging version after training.
+reload:
+	$(COMPOSE) restart api
 
 # Run the contract/observability tests in the API image (no host Python needed).
 test:
