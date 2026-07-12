@@ -136,6 +136,12 @@ jobs:
           done
           $CI_COMPOSE exec -T api python -c "import json,urllib.request; d=json.load(urllib.request.urlopen('http://127.0.0.1:8112/model-info')); print(d); assert d['source']=='mlflow' and d['is_real_model'], 'api is not serving the registered model'"
 
+      # The throwaway and live stacks share this one host (6 services each). Now that validation
+      # has passed, tear the throwaway stack down BEFORE the live deploy so we never run both at
+      # once — the deploy then gets the host to itself.
+      - name: Tear down the throwaway stack (before deploying to live)
+        run: make clean COMPOSE="$CI_COMPOSE"
+
       - name: Apply — deploy new pipeline + serving to live and run it there
         env:
           DEPLOY_DIR: ${{ vars.DEPLOY_DIR }}
@@ -150,7 +156,10 @@ jobs:
           curl -sf http://localhost:8112/model-info | tee /dev/stderr | grep -q '"is_real_model":true' \
             || { echo "::error::live api not serving the registered model after deploy"; exit 1; }
 
-      - name: Tear down the throwaway stack
+      # Safety net: if validation failed above, the teardown-before-deploy step was skipped, so
+      # the throwaway stack is still up. `if: always()` guarantees it's cleaned up either way
+      # (a no-op — exit 0 — when the earlier teardown already removed it on the success path).
+      - name: Tear down the throwaway stack (safety net)
         if: always()
         run: make clean COMPOSE="$CI_COMPOSE"
 
