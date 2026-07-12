@@ -125,6 +125,15 @@ jobs:
           # A successful run must leave the api serving the freshly registered model. Ports are
           # reset, so assert over the internal network via exec. This is what catches a
           # train/serve mismatch that would otherwise ship a broken product.
+          #
+          # bootstrap ends by restarting the api, which reloads the MLflow model BEFORE it starts
+          # serving. `docker compose restart` returns the instant the container starts, so a single
+          # immediate assert races startup and hits connection-refused. Poll until the api is back
+          # and serving the registered model (up to ~60s), then make the assertion terminal.
+          for i in $(seq 1 30); do
+            $CI_COMPOSE exec -T api python -c "import json,urllib.request; d=json.load(urllib.request.urlopen('http://127.0.0.1:8112/model-info')); assert d['source']=='mlflow' and d['is_real_model']" >/dev/null 2>&1 && break
+            sleep 2
+          done
           $CI_COMPOSE exec -T api python -c "import json,urllib.request; d=json.load(urllib.request.urlopen('http://127.0.0.1:8112/model-info')); print(d); assert d['source']=='mlflow' and d['is_real_model'], 'api is not serving the registered model'"
 
       - name: Apply — deploy new pipeline + serving to live and run it there
