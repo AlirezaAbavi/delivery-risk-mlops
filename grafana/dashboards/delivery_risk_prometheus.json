@@ -2,7 +2,7 @@
   "uid": "delivery-risk",
   "title": "Delivery-Risk Service (Prometheus)",
   "description": "Service health + model output for the delivery-risk API, read from the local Prometheus. Every query is pinned to $instance. Auto-provisioned into Grafana on docker compose up.",
-  "tags": ["delivery-risk", "mlops", "prometheus", "cd"],
+  "tags": ["delivery-risk", "mlops", "prometheus", "cd", "demo"],
   "timezone": "browser",
   "schemaVersion": 39,
   "version": 4,

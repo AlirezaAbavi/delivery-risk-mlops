@@ -14,6 +14,8 @@
 #
 # DATA selects the pipeline's input: `sample` (default, committed synthetic data) or
 # `full` (the Kaggle download in olist_data/). Example:  make demo DATA=full
+#
+# `sample` is what CI/CD validates on — no Kaggle credentials or network needed.
 
 DATA ?= sample
 COMPOSE ?= docker compose
